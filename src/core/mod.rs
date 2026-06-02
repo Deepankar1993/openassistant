@@ -12,6 +12,10 @@ pub mod standing_orders;
 pub mod multi_agent;
 pub mod web_search;
 pub mod goal_system;
+pub mod permissions;
+pub mod checkpoint;
+pub mod worktree;
+pub mod agent_teams;
 
 use serde::{Deserialize, Serialize};
 

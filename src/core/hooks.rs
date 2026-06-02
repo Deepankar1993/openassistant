@@ -1,251 +1,334 @@
 // src/core/hooks.rs
-//! Hooks system — event-driven automation (OpenClaw-style)
-//! Small scripts/configs that run when events fire inside the gateway
+//! Hooks system — event-driven shell command callbacks (Claude Code-style)
+//! Hooks are defined in .claude/hooks/hooks.json and execute shell commands
+//! at key agent lifecycle events.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
-/// Events that can trigger hooks
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+// ─── Hook Events ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum HookEvent {
-    SessionNew,
-    SessionEnd,
-    MessageReceived,
-    MessageSent,
-    ToolCalled,
-    ToolReturned,
-    Error,
-    UserJoined,
-    UserLeft,
-    CronFired,
-    SkillLoaded,
-    MemoryUpdated,
-    AgentBoot,
-    AgentShutdown,
+    #[serde(rename = "session_start")]
+    SessionStart,
+    #[serde(rename = "user_prompt_submit")]
+    UserPromptSubmit,
+    #[serde(rename = "pre_tool_use")]
+    PreToolUse,
+    #[serde(rename = "post_tool_use")]
+    PostToolUse,
+    #[serde(rename = "post_tool_use_failure")]
+    PostToolUseFailure,
+    #[serde(rename = "stop")]
+    Stop,
+    #[serde(rename = "subagent_stop")]
+    SubagentStop,
+    #[serde(rename = "pre_compact")]
+    PreCompact,
+    #[serde(rename = "notification")]
+    Notification,
+    #[serde(rename = "message_display")]
+    MessageDisplay,
 }
 
-/// Action to take when a hook fires
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HookAction {
-    /// Run a shell command
-    Shell { command: String },
-    /// Save a note to daily memory
-    SaveNote { template: String },
-    /// Send a message to a channel
-    SendMessage { channel: String, message: String },
-    /// Trigger another hook (chain)
-    ChainHook { hook_name: String },
-    /// Run a skill
-    RunSkill { skill_name: String },
-    /// Webhook HTTP call
-    Webhook { url: String, body: String },
-    /// No-op (for logging only)
-    Log { message: String },
-}
+// ─── Hook Definition (from hooks.json) ────────────────────────────────
 
-/// A single hook definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hook {
-    pub name: String,
+pub struct HookDefinition {
+    /// Which event triggers this hook
     pub event: HookEvent,
-    pub actions: Vec<HookAction>,
-    pub enabled: bool,
+    /// Shell command to execute
+    pub command: String,
+    /// Human-readable description
     pub description: String,
+    /// Working directory (defaults to workspace root)
+    pub working_dir: Option<String>,
+    /// Timeout in seconds (default 30)
+    pub timeout_seconds: Option<u64>,
+    /// Environment variables to set
+    pub env: Option<HashMap<String, String>>,
+    /// Whether this hook is enabled
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
-/// Hook engine — registers and fires hooks
+fn default_enabled() -> bool {
+    true
+}
+
+// ─── Hook Context (passed to hooks via stdin as JSON) ─────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookContext {
+    pub session_id: String,
+    pub workspace_dir: String,
+    pub event: String,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_output: Option<String>,
+    pub user_message: Option<String>,
+    pub assistant_message: Option<String>,
+    pub timestamp: String,
+}
+
+// ─── Hook Result ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookResult {
+    pub hook_event: String,
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    /// If the hook wants to block a tool (PreToolUse only)
+    pub block: bool,
+    /// If the hook wants to modify the tool input
+    pub modified_input: Option<serde_json::Value>,
+}
+
+// ─── Hook Engine ──────────────────────────────────────────────────────
+
 #[derive(Debug, Default)]
 pub struct HookEngine {
-    hooks: HashMap<HookEvent, Vec<Hook>>,
+    hooks: Vec<HookDefinition>,
 }
 
 impl HookEngine {
     pub fn new() -> Self {
-        let mut engine = Self::default();
-        engine.load_defaults();
-        engine
+        Self::default()
     }
 
-    /// Register a hook
-    pub fn register(&mut self, hook: Hook) {
-        debug!("Registering hook: {} for {:?}", hook.name, hook.event);
-        self.hooks.entry(hook.event.clone()).or_default().push(hook);
+    /// Load hooks from .claude/hooks/hooks.json
+    pub fn load_from_file(path: &str) -> Result<Self> {
+        let mut engine = Self::new();
+        engine.load_hooks(path)?;
+        Ok(engine)
     }
 
-    /// Fire an event — runs all matching hooks
-    pub async fn fire(&self, event: &HookEvent, context: &HookContext) -> Vec<HookResult> {
+    /// Auto-load from workspace directory
+    pub fn load_from_workspace(workspace_dir: &str) -> Result<Self> {
+        let hooks_path = format!("{}/.claude/hooks/hooks.json", workspace_dir);
+        Self::load_from_file(&hooks_path)
+    }
+
+    fn load_hooks(&mut self, path: &str) -> Result<()> {
+        let path_buf = PathBuf::from(path);
+        if !path_buf.exists() {
+            debug!("Hooks file not found: {}", path);
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&path_buf)?;
+        let hooks: Vec<HookDefinition> = serde_json::from_str(&content)?;
+        info!("Loaded {} hooks from {}", hooks.len(), path);
+        self.hooks = hooks;
+        Ok(())
+    }
+
+    pub fn register(&mut self, hook: HookDefinition) {
+        self.hooks.push(hook);
+    }
+
+    /// Fire all hooks matching the given event
+    pub async fn fire(&self, event: &HookEvent, ctx: &HookContext) -> Vec<HookResult> {
+        let matching: Vec<&HookDefinition> = self.hooks
+            .iter()
+            .filter(|h| &h.event == event && h.enabled)
+            .collect();
+
         let mut results = Vec::new();
 
-        if let Some(hooks) = self.hooks.get(event) {
-            for hook in hooks {
-                if !hook.enabled { continue; }
-                info!("Firing hook: {} for {:?}", hook.name, event);
-
-                for action in &hook.actions {
-                    let result = self.execute_action(action, context);
-                    results.push(HookResult {
-                        hook_name: hook.name.clone(),
-                        action: format!("{:?}", action),
-                        success: result.is_ok(),
-                        error: result.err().map(|e| e.to_string()),
-                    });
-                }
-            }
+        for hook in matching {
+            let result = self.execute_hook(hook, ctx).await;
+            results.push(result);
         }
 
         results
     }
 
-    fn execute_action(&self, action: &HookAction, ctx: &HookContext) -> Result<()> {
-        match action {
-            HookAction::Shell { command } => {
-                let cmd = interpolate(command, ctx);
-                debug!("Hook running shell: {}", cmd);
-                std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .output()?;
-            }
-            HookAction::SaveNote { template } => {
-                let note = interpolate(template, ctx);
-                debug!("Hook saving note: {}", note);
-                // The actual save happens in the daily memory system
-            }
-            HookAction::SendMessage { channel, message } => {
-                let msg = interpolate(message, ctx);
-                info!("Hook sending to {}: {}", channel, &msg[..msg.len().min(100)]);
-            }
-            HookAction::Log { message } => {
-                let msg = interpolate(message, ctx);
-                info!("[HOOK] {}", msg);
-            }
-            HookAction::Webhook { url, body } => {
-                let url = interpolate(url, ctx);
-                let _body = interpolate(body, ctx);
-                debug!("Hook webhook: {}", url);
-            }
-            HookAction::RunSkill { skill_name } => {
-                info!("Hook running skill: {}", skill_name);
-            }
-            HookAction::ChainHook { hook_name } => {
-                info!("Hook chaining to: {}", hook_name);
+    /// Execute a single hook — runs the shell command
+    async fn execute_hook(&self, hook: &HookDefinition, ctx: &HookContext) -> HookResult {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(hook.timeout_seconds.unwrap_or(30));
+
+        // Build the command
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(&hook.command);
+
+        // Set working directory
+        if let Some(ref dir) = hook.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        // Set environment variables
+        if let Some(ref env_vars) = hook.env {
+            for (key, value) in env_vars {
+                cmd.env(key, value);
             }
         }
-        Ok(())
-    }
 
-    pub fn list_hooks(&self) -> Vec<&Hook> {
-        self.hooks.values().flat_map(|v| v.iter()).collect()
-    }
+        // Pass context as JSON via stdin
+        let ctx_json = serde_json::to_string(ctx).unwrap_or_default();
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
-    pub fn enable_hook(&mut self, name: &str, enabled: bool) {
-        for hooks in self.hooks.values_mut() {
-            for hook in hooks {
-                if hook.name == name {
-                    hook.enabled = enabled;
-                }
+        debug!("Executing hook: {} (event: {:?})", hook.description, hook.event);
+
+        // Execute with timeout
+        let output = match tokio::time::timeout(timeout, async {
+            let mut child = cmd.spawn()?;
+            // Write context to stdin
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(ctx_json.as_bytes()).await;
             }
+            child.wait_with_output().await
+        }).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return HookResult {
+                    hook_event: format!("{:?}", hook.event),
+                    command: hook.command.clone(),
+                    stdout: String::new(),
+                    stderr: format!("Failed to execute hook: {}", e),
+                    exit_code: -1,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    block: false,
+                    modified_input: None,
+                };
+            }
+            Err(_) => {
+                warn!("Hook timed out after {:?}: {}", timeout, hook.description);
+                return HookResult {
+                    hook_event: format!("{:?}", hook.event),
+                    command: hook.command.clone(),
+                    stdout: String::new(),
+                    stderr: format!("Hook timed out after {:?}", timeout),
+                    exit_code: -1,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    block: false,
+                    modified_input: None,
+                };
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        // Parse hook response — hooks can return JSON to block/modify
+        let (block, modified_input) = if !stdout.trim().is_empty() {
+            if let Ok(response) = serde_json::from_str::<HookResponse>(stdout.trim()) {
+                (response.block, response.modified_input)
+            } else {
+                (false, None)
+            }
+        } else {
+            (false, None)
+        };
+
+        HookResult {
+            hook_event: format!("{:?}", hook.event),
+            command: hook.command.clone(),
+            stdout,
+            stderr,
+            exit_code,
+            duration_ms: start.elapsed().as_millis() as u64,
+            block,
+            modified_input,
         }
     }
 
-    fn load_defaults(&mut self) {
-        // Session end → distill memories
-        self.register(Hook {
-            name: "session-distill".to_string(),
-            event: HookEvent::SessionEnd,
-            actions: vec![
-                HookAction::Log { message: "Session ended. Consider distilling memories.".to_string() },
-            ],
-            enabled: true,
-            description: "Triggered when a session ends — prompts memory distillation".to_string(),
-        });
-
-        // Error → log and notify
-        self.register(Hook {
-            name: "error-logger".to_string(),
-            event: HookEvent::Error,
-            actions: vec![
-                HookAction::Log { message: "Error occurred: {{error_message}}".to_string() },
-            ],
-            enabled: true,
-            description: "Triggered on errors — logs for debugging".to_string(),
-        });
-
-        // New memory saved → update search index
-        self.register(Hook {
-            name: "memory-index".to_string(),
-            event: HookEvent::MemoryUpdated,
-            actions: vec![
-                HookAction::Log { message: "Memory updated: {{content}}".to_string() },
-            ],
-            enabled: true,
-            description: "Triggered when memory is updated".to_string(),
-        });
-
-        // Agent boot → workspace init
-        self.register(Hook {
-            name: "boot-init".to_string(),
-            event: HookEvent::AgentBoot,
-            actions: vec![
-                HookAction::Log { message: "Agent booted. Workspace: {{workspace_dir}}".to_string() },
-            ],
-            enabled: true,
-            description: "Triggered when agent starts".to_string(),
-        });
+    pub fn list_hooks(&self) -> &[HookDefinition] {
+        &self.hooks
     }
-}
 
-/// Context available to hook templates
-#[derive(Debug, Clone, Serialize)]
-pub struct HookContext {
-    pub workspace_dir: String,
-    pub channel: String,
-    pub user_id: String,
-    pub user_name: String,
-    pub session_id: String,
-    pub message_count: usize,
-    pub error_message: Option<String>,
-    pub content: Option<String>,
-    pub timestamp: String,
-}
-
-impl HookContext {
-    pub fn new(workspace_dir: &str) -> Self {
-        Self {
-            workspace_dir: workspace_dir.to_string(),
-            channel: "cli".to_string(),
-            user_id: "local".to_string(),
-            user_name: "User".to_string(),
-            session_id: uuid::Uuid::new_v4().to_string(),
-            message_count: 0,
-            error_message: None,
-            content: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+    pub fn enable_hook(&mut self, description: &str, enabled: bool) {
+        for hook in &mut self.hooks {
+            if hook.description == description {
+                hook.enabled = enabled;
+                info!("Hook '{}' enabled: {}", description, enabled);
+                return;
+            }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct HookResult {
-    pub hook_name: String,
-    pub action: String,
-    pub success: bool,
-    pub error: Option<String>,
+/// Hook response format (stdout from hook command)
+#[derive(Debug, Deserialize)]
+struct HookResponse {
+    #[serde(default)]
+    block: bool,
+    modified_input: Option<serde_json::Value>,
 }
 
-/// Simple template interpolation
-fn interpolate(template: &str, ctx: &HookContext) -> String {
-    template
-        .replace("{{workspace_dir}}", &ctx.workspace_dir)
-        .replace("{{channel}}", &ctx.channel)
-        .replace("{{user_id}}", &ctx.user_id)
-        .replace("{{user_name}}", &ctx.user_name)
-        .replace("{{session_id}}", &ctx.session_id)
-        .replace("{{timestamp}}", &ctx.timestamp)
-        .replace("{{error_message}}", &ctx.error_message.clone().unwrap_or_default())
-        .replace("{{content}}", &ctx.content.clone().unwrap_or_default())
-        .replace("{{message_count}}", &ctx.message_count.to_string())
+// ─── Default Hooks ────────────────────────────────────────────────────
+
+pub fn default_hooks() -> Vec<HookDefinition> {
+    vec![
+        HookDefinition {
+            event: HookEvent::SessionStart,
+            command: "echo 'Session started'".to_string(),
+            description: "Log session start".to_string(),
+            working_dir: None,
+            timeout_seconds: Some(5),
+            env: None,
+            enabled: false, // Disabled by default
+        },
+        HookDefinition {
+            event: HookEvent::PreToolUse,
+            command: "echo '{}'".to_string(),
+            description: "Pre-tool-use validation".to_string(),
+            working_dir: None,
+            timeout_seconds: Some(5),
+            env: None,
+            enabled: false,
+        },
+        HookDefinition {
+            event: HookEvent::PostToolUse,
+            command: "echo 'Tool completed'".to_string(),
+            description: "Post-tool-use logging".to_string(),
+            working_dir: None,
+            timeout_seconds: Some(5),
+            env: None,
+            enabled: false,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_hooks_from_json() {
+        let json = r#"[
+            {
+                "event": "session_start",
+                "command": "echo 'hello'",
+                "description": "Test hook",
+                "timeout_seconds": 5,
+                "enabled": true
+            }
+        ]"#;
+
+        let hooks: Vec<HookDefinition> = serde_json::from_str(json).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].description, "Test hook");
+        assert!(hooks[0].enabled);
+    }
+
+    #[test]
+    fn test_hook_response_parsing() {
+        let json = r#"{"block": true, "modified_input": {"command": "safe_command"}}"#;
+        let response: HookResponse = serde_json::from_str(json).unwrap();
+        assert!(response.block);
+        assert!(response.modified_input.is_some());
+    }
 }
