@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-cargo build                 # debug build
+cargo build                 # debug build (CLI binary + open_assistant lib)
 cargo build --release       # release build
+cargo build --workspace     # also builds the src-tauri desktop crate
 cargo run -- <subcommand>   # e.g. cargo run -- tui
 cargo check                 # fast type-check without producing a binary
 cargo clippy                # lints
@@ -14,12 +15,24 @@ cargo clippy                # lints
 
 Run a subcommand: `cargo run -- tui` (interactive terminal UI, also aliased as `chat`), `web --port 3000`, `gateway`, `onboard`, `status`, `doctor`, `config --key model.model --value ...`. See `Commands` enum in `src/main.rs` for the full list (memory, skills, agents, plugins, workflow, checkpoint).
 
+### Desktop app (Tauri 2.x)
+The desktop app lives in `src-tauri/` (crate `openassistant-desktop`) with a static frontend in `frontend/`. It reuses the agent core **in-process** via the `open_assistant` library target — it does NOT shell out to the CLI.
+
+```bash
+cargo tauri dev             # run the desktop app (from repo root; --no-watch to disable file-watch)
+cargo tauri build           # produce a bundled installer
+```
+
+First run routes to **Settings** until an API key is set (the default key ships empty). Tool execution (shell/file access) is **off by default** in the desktop app and gated behind an opt-in toggle.
+
 ### Tests
-There is currently **no test suite** — no `tests/` directory and no `#[cfg(test)]` modules, despite `tempfile`/`tokio-test` being listed as dev-dependencies. Run a single test (once tests exist) with `cargo test <name>`.
+Tests now exist (run a single one with `cargo test <name>`):
+- **Rust unit tests** — `cargo test --workspace`. Covers config YAML round-trip + defaults (`src/config/mod.rs`) and the desktop command layer (`src-tauri/src/commands.rs`). NOTE: two **pre-existing** tests in `src/core/permissions.rs` (`test_wildcard_matching`, `test_permission_rules_priority`) currently FAIL — unrelated to the desktop work; a wildcard-matching bug in the permissions module.
+- **Playwright E2E** — `cd tests/e2e && npm install && npx playwright test`. Drives the static frontend in Chromium against an injectable mock backend (`window.__MOCK_BACKEND__`), so UI logic is testable on every OS including macOS (which has no native WKWebView WebDriver). Native `tauri-driver` smoke tests are a Windows/Linux-only follow-up.
 
 ## Important: docs describe a plan, not the code
 
-`ARCHITECTURE.md` and parts of `README.md` describe an *aspirational* design (a Cargo **workspace** with `crates/`, 60+ tools, voice, companion apps). The actual project is a **single binary crate** with all modules under `src/`. Trust the source over those docs. Many advanced features are **scaffolded stubs** that return placeholder strings rather than doing real work — notably `goal_deliberate` and `task` (sub-agent) in `src/core/agent.rs` emit "In a full implementation..." text and do not actually call the LLM or spawn agents. Verify a feature is wired end-to-end before assuming it works.
+`ARCHITECTURE.md` and parts of `README.md` describe an *aspirational* design (a Cargo workspace with `crates/`, 60+ tools, voice, companion apps). The actual project is a **two-member Cargo workspace**: the root crate (`open-assistant`) exposes both the `open_assistant` **library** (`src/lib.rs`) and the CLI **binary** (`src/main.rs`), and `src-tauri/` is the desktop app crate that path-depends on the root. (The root was a single binary crate before the `add-desktop-app` change; the `[lib]` split lets the desktop reuse the core in-process.) Trust the source over the aspirational docs. Many advanced features are **scaffolded stubs** that return placeholder strings rather than doing real work — notably `goal_deliberate` and `task` (sub-agent) in `src/core/agent.rs` emit "In a full implementation..." text and do not actually call the LLM or spawn agents. Verify a feature is wired end-to-end before assuming it works. The desktop app deliberately surfaces only the wired chat path and does NOT expose these stubs as working features.
 
 ## Architecture
 
