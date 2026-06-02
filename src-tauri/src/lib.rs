@@ -15,7 +15,7 @@ fn build_core() -> AppCore {
     let cfg = tauri::async_runtime::block_on(open_assistant::config::load()).unwrap_or_default();
     let agent = Agent::new(cfg.model.model)
         .with_workspace(cfg.general.data_dir)
-        .with_tools_enabled(false);
+        .with_tools_enabled(cfg.tools.enabled);
     AppCore::new(agent)
 }
 

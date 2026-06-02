@@ -12,6 +12,24 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub security: SecurityConfig,
     pub vision: VisionConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+}
+
+/// Tool-execution posture. The desktop app constructs the agent from this so a
+/// user's opt-in (or opt-out) of shell/file access survives restarts.
+/// `#[serde(default)]` on the `Config.tools` field keeps existing config.yaml
+/// files (written before this section existed) loadable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    pub enabled: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

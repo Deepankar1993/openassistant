@@ -117,6 +117,7 @@ pub async fn run_wizard() -> Result<()> {
             provider: "gemini-cli".to_string(),
             gemini_path: "gemini".to_string(),
         },
+        tools: crate::config::ToolsConfig::default(),
     };
 
     crate::config::save(&config).await?;

@@ -157,8 +157,12 @@ pub async fn save_config(
 /// warning that the model would gain shell/file access on this machine.
 #[tauri::command]
 pub async fn set_tools_enabled(state: State<'_, AppCore>, enabled: bool) -> Result<(), String> {
+    // Persist the choice so it survives a restart (build_core reads tools.enabled).
     let mut turn = state.turn.lock().await;
     turn.agent.tools_enabled = enabled;
+    let mut cfg = config::load().await.map_err(|e| e.to_string())?;
+    cfg.tools.enabled = enabled;
+    config::save(&cfg).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
