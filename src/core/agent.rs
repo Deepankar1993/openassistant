@@ -121,33 +121,37 @@ impl Agent {
             prompt.push('\n');
         }
 
-        // Tool instructions
-        prompt.push_str("# Available Tools\n");
-        prompt.push_str("Use [TOOL:name:{\"arg\":\"value\"}] to invoke tools:\n");
-        for tool in &self.tools {
-            prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+        // Tool instructions — only advertised when tool dispatch is enabled.
+        // Otherwise the model would emit [TOOL:...] syntax that `process()` drops,
+        // leaking unexecuted tool markup into the visible reply.
+        if self.tools_enabled {
+            prompt.push_str("# Available Tools\n");
+            prompt.push_str("Use [TOOL:name:{\"arg\":\"value\"}] to invoke tools:\n");
+            for tool in &self.tools {
+                prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+            }
+            prompt.push('\n');
+
+            // Self-management instructions
+            push_str(&mut prompt, "# Self-Management");
+            push_str(&mut prompt, "- You can request updates to your own skills and memory");
+            push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"read_skill\",\"name\":\"...\"}] to read skills");
+            push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"update_memory\",\"content\":\"...\"}] to update MEMORY.md");
+            push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"create_skill\",\"name\":\"...\",\"content\":\"...\"}] to create new skills");
+            push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"self_update\"}] to check for openAssistant updates");
+            push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"run_command\",\"command\":\"...\"}] to run terminal commands (with user permission)");
+
+            // Multi-agent goal deliberation instructions
+            push_str(&mut prompt, "\n# Multi-Agent Goal Deliberation");
+            push_str(&mut prompt, "When working on complex goals, use [TOOL:goal_deliberate:{\"title\":\"...\",\"description\":\"...\"}] to spawn a deliberation with:");
+            push_str(&mut prompt, "  ⚖️ Judge — unbiased feasibility evaluation");
+            push_str(&mut prompt, "  😈 Devil's Advocate — challenges assumptions");
+            push_str(&mut prompt, "  🔍 Researcher — gathers context and best practices");
+            push_str(&mut prompt, "  🔧 Executor — plans concrete implementation steps");
+            push_str(&mut prompt, "  🧩 Synthesizer — combines all perspectives into final plan");
+            push_str(&mut prompt, "Use [TOOL:todo_write:{\"todos\":[...]}] to track progress across turns.");
+            push_str(&mut prompt, "Use [TOOL:plan_mode:{\"action\":\"toggle\"}] to switch between plan and execute modes.");
         }
-        prompt.push('\n');
-
-        // Self-management instructions
-        push_str(&mut prompt, "# Self-Management");
-        push_str(&mut prompt, "- You can request updates to your own skills and memory");
-        push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"read_skill\",\"name\":\"...\"}] to read skills");
-        push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"update_memory\",\"content\":\"...\"}] to update MEMORY.md");
-        push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"create_skill\",\"name\":\"...\",\"content\":\"...\"}] to create new skills");
-        push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"self_update\"}] to check for openAssistant updates");
-        push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"run_command\",\"command\":\"...\"}] to run terminal commands (with user permission)");
-
-        // Multi-agent goal deliberation instructions
-        push_str(&mut prompt, "\n# Multi-Agent Goal Deliberation");
-        push_str(&mut prompt, "When working on complex goals, use [TOOL:goal_deliberate:{\"title\":\"...\",\"description\":\"...\"}] to spawn a deliberation with:");
-        push_str(&mut prompt, "  ⚖️ Judge — unbiased feasibility evaluation");
-        push_str(&mut prompt, "  😈 Devil's Advocate — challenges assumptions");
-        push_str(&mut prompt, "  🔍 Researcher — gathers context and best practices");
-        push_str(&mut prompt, "  🔧 Executor — plans concrete implementation steps");
-        push_str(&mut prompt, "  🧩 Synthesizer — combines all perspectives into final plan");
-        push_str(&mut prompt, "Use [TOOL:todo_write:{\"todos\":[...]}] to track progress across turns.");
-        push_str(&mut prompt, "Use [TOOL:plan_mode:{\"action\":\"toggle\"}] to switch between plan and execute modes.");
 
         prompt
     }
@@ -212,13 +216,9 @@ impl Agent {
             .unwrap_or("")
             .to_string();
 
-        if content.trim().is_empty() {
-            anyhow::bail!(
-                "LLM returned an empty response (model `{}`). Check the model name and provider.",
-                self.model
-            );
-        }
-
+        // NOTE: we deliberately do NOT bail on empty content. A 2xx response with
+        // empty/null content is valid for some providers; the real silent-failure
+        // cases (missing key, non-2xx) are already handled above.
         Ok(content)
     }
 

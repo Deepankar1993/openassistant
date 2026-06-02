@@ -20,8 +20,8 @@ async function installMock(page, { apiKeySet = false, failSend = false } = {}) {
           case "clear_conversation": state.history = []; return null;
           case "set_tools_enabled": state.tools = !!args.enabled; return null;
           case "save_config":
-            state.cfg.model = args.model; state.cfg.api_base = args.apiBase;
-            if (args.apiKey) { state.cfg.api_key_set = true; state.cfg.api_key_masked = "••••••••" + String(args.apiKey).slice(-4); }
+            state.cfg.model = args.model; state.cfg.api_base = args.api_base;
+            if (args.api_key) { state.cfg.api_key_set = true; state.cfg.api_key_masked = "••••••••" + String(args.api_key).slice(-4); }
             return null;
           case "send_message": {
             if (failSend) throw "LLM request failed: HTTP 401 — invalid key";

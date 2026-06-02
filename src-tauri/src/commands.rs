@@ -77,8 +77,10 @@ pub async fn get_history(state: State<'_, AppCore>) -> Result<Vec<Message>, Stri
 /// Sidebar status. Reloads config so a freshly-saved api_key is reflected.
 #[tauri::command]
 pub async fn get_status(state: State<'_, AppCore>) -> Result<StatusResponse, String> {
-    let turn = state.turn.lock().await;
+    // Load config before locking so a slow disk read does not hold the turn
+    // mutex and stall an in-flight send_message.
     let cfg = config::load().await.map_err(|e| e.to_string())?;
+    let turn = state.turn.lock().await;
     Ok(StatusResponse {
         model: turn.agent.model.clone(),
         provider: cfg.model.provider,
@@ -127,6 +129,9 @@ pub async fn save_config(
     api_base: String,
     api_key: Option<String>,
 ) -> Result<(), String> {
+    // Acquire the turn lock for the whole load→mutate→save cycle so two
+    // concurrent saves cannot read the same snapshot and lost-update each other.
+    let mut turn = state.turn.lock().await;
     let mut cfg = config::load().await.map_err(|e| e.to_string())?;
     cfg.model.model = model.trim().to_string();
     cfg.model.api_base = api_base.trim().to_string();
@@ -138,7 +143,6 @@ pub async fn save_config(
     }
     config::save(&cfg).await.map_err(|e| e.to_string())?;
 
-    let mut turn = state.turn.lock().await;
     if turn.agent.model != cfg.model.model {
         let tools = turn.agent.tools_enabled;
         let ws = turn.agent.workspace_dir.clone();

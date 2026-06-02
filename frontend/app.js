@@ -26,10 +26,8 @@
       case "clear_conversation": mockState.history = []; return null;
       case "set_tools_enabled": mockState.tools = !!args.enabled; return null;
       case "save_config":
-        // Frontend sends camelCase (Tauri converts these to snake_case for Rust);
-        // the browser-mode mock receives them verbatim, so read camelCase here.
-        mockState.config.model = args.model; mockState.config.api_base = args.apiBase;
-        if (args.apiKey) { mockState.config.api_key_set = true; mockState.config.api_key_masked = "••••••••" + String(args.apiKey).slice(-4); }
+        mockState.config.model = args.model; mockState.config.api_base = args.api_base;
+        if (args.api_key) { mockState.config.api_key_set = true; mockState.config.api_key_masked = "••••••••" + String(args.api_key).slice(-4); }
         return null;
       case "send_message": {
         if (!mockState.config.api_key_set) throw "No API key configured.";
@@ -189,10 +187,12 @@
     status.textContent = "Saving…";
     const key = $("#cfg-api-key").value.trim();
     try {
+      // Use snake_case keys matching the Rust command params directly, so the
+      // binding is correct independent of Tauri's camelCase conversion.
       await backend("save_config", {
         model: $("#cfg-model").value.trim(),
-        apiBase: $("#cfg-api-base").value.trim(),
-        apiKey: key.length ? key : null,
+        api_base: $("#cfg-api-base").value.trim(),
+        api_key: key.length ? key : null,
       });
       await backend("set_tools_enabled", { enabled: $("#cfg-tools").checked });
       status.textContent = "Saved ✓";
