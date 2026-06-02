@@ -6,6 +6,17 @@ description = "openAssistant — A unified personal AI assistant combining OpenH
 license = "MIT"
 repository = "https://github.com/openassistant/open-assistant"
 
+# Library target: exposes the agent core for in-process reuse by the CLI
+# binary and the Tauri desktop app (src-tauri/).
+[lib]
+name = "open_assistant"
+path = "src/lib.rs"
+
+# Explicit binary target so the lib/bin split is unambiguous.
+[[bin]]
+name = "openassistant"
+path = "src/main.rs"
+
 [dependencies]
 # Core
 tokio = { version = "1", features = ["full"] }

@@ -1,19 +1,11 @@
 // src/main.rs
-mod core;
-mod gateway;
-mod memory;
-mod skills;
-mod cron;
-mod tools;
-mod platforms;
-mod canvas;
-mod security;
-mod onboarding;
-mod ui;
-mod config;
+//! openAssistant CLI binary. The agent core lives in the `open_assistant`
+//! library crate (`src/lib.rs`); this binary links it and exposes the
+//! `clap`-based command surface.
+use open_assistant::{config, gateway, onboarding, skills, tools, ui};
 
 use clap::Parser;
-use tracing::{info, error};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "openassistant", version, about = "openAssistant — Your personal AI assistant")]
@@ -107,14 +99,14 @@ async fn main() -> anyhow::Result<()> {
             println!("Model: {}", config.model.model);
             println!("Data dir: {}", config.general.data_dir);
 
-            let mem = crate::memory::store::MemoryStore::open_default().await?;
+            let mem = open_assistant::memory::store::MemoryStore::open_default().await?;
             match mem.count() {
                 Ok(c) => println!("Memory entries: {}", c),
                 Err(e) => println!("Memory: {}", e),
             }
 
             // Check workspace memory
-            let ws = crate::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
+            let ws = open_assistant::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
             let lt = ws.read_long_term();
             if !lt.is_empty() {
                 println!("MEMORY.md: {} chars", lt.len());
@@ -129,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Memory { action, content } => {
             let config = config::load().await?;
-            let ws = crate::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
+            let ws = open_assistant::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
             ws.init()?;
 
             match action.as_deref() {
@@ -227,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
             let workspace = &config.general.data_dir;
             match action.as_deref() {
                 Some("list") => {
-                    let mut orchestrator = crate::core::subagent::SubAgentOrchestrator::new();
+                    let mut orchestrator = open_assistant::core::subagent::SubAgentOrchestrator::new();
                     let _ = orchestrator.load_definitions(&format!("{}/.claude/agents", workspace));
                     println!("📋 Sub-agent definitions:");
                     for def in orchestrator.list_definitions() {
@@ -236,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Some("load") => {
                     if let Some(n) = name {
-                        let mut orchestrator = crate::core::subagent::SubAgentOrchestrator::new();
+                        let mut orchestrator = open_assistant::core::subagent::SubAgentOrchestrator::new();
                         let _ = orchestrator.load_definitions(&format!("{}/.claude/agents", workspace));
                         if let Some(def) = orchestrator.get_definition(&n) {
                             println!("Loaded agent: {} — {}", def.name, def.description);
@@ -257,13 +249,13 @@ async fn main() -> anyhow::Result<()> {
             let workspace = &config.general.data_dir;
             match action.as_deref() {
                 Some("list") => {
-                    let mut marketplace = crate::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
+                    let mut marketplace = open_assistant::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
                     let _ = marketplace.load_installed();
                     println!("{}", marketplace.format_status());
                 }
                 Some("enable") => {
                     if let Some(n) = name {
-                        let mut marketplace = crate::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
+                        let mut marketplace = open_assistant::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
                         let _ = marketplace.load_installed();
                         marketplace.set_enabled(&n, true);
                         println!("Plugin '{}' enabled", n);
@@ -277,8 +269,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Workflow { name } => {
-            let mut engine = crate::core::workflows::WorkflowEngine::new();
-            for wf in crate::core::workflows::built_in_workflows() {
+            let mut engine = open_assistant::core::workflows::WorkflowEngine::new();
+            for wf in open_assistant::core::workflows::built_in_workflows() {
                 engine.register_workflow(wf);
             }
             match engine.execute(&name).await {
@@ -289,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Checkpoint { action, id } => {
             let config = config::load().await?;
             let workspace = &config.general.data_dir;
-            let mut store = crate::core::checkpoint::CheckpointStore::new();
+            let mut store = open_assistant::core::checkpoint::CheckpointStore::new();
             match action.as_deref() {
                 Some("list") => {
                     if let Some(session_id) = id {
@@ -318,13 +310,13 @@ async fn run_diagnostics() -> anyhow::Result<()> {
         Err(e) => println!("❌ Config: {}", e),
     }
 
-    match crate::memory::store::MemoryStore::open_default().await {
+    match open_assistant::memory::store::MemoryStore::open_default().await {
         Ok(_) => println!("✅ Memory DB: OK"),
         Err(e) => println!("❌ Memory DB: {}", e),
     }
 
     let config = config::load().await?;
-    let ws = crate::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
+    let ws = open_assistant::core::memory::MemoryWorkspace::from_data_dir(&config.general.data_dir);
     match ws.init() {
         Ok(_) => println!("✅ Memory workspace: OK"),
         Err(e) => println!("❌ Memory workspace: {}", e),
