@@ -16,6 +16,11 @@ pub mod permissions;
 pub mod checkpoint;
 pub mod worktree;
 pub mod agent_teams;
+pub mod mcp;
+pub mod streaming;
+pub mod plugins;
+pub mod workflows;
+pub mod channels;
 
 use serde::{Deserialize, Serialize};
 
