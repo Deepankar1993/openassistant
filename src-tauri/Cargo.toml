@@ -26,3 +26,11 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2", features = [] }
 tauri-plugin-log = "2"
+# Native folder picker (onboarding) and safe external-link opening (provider docs).
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+# Direct dependency: probe_connection calls the LLM endpoint from Rust, NOT the
+# webview, so it does not go through tauri-plugin-http's frontend gate.
+reqwest = { version = "0.12", features = ["json"] }
+# Async fs (path-writability, skill files) and timeouts (vision probe).
+tokio = { version = "1", features = ["fs", "time"] }
