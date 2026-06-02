@@ -6,6 +6,13 @@ description = "openAssistant — A unified personal AI assistant combining OpenH
 license = "MIT"
 repository = "https://github.com/openassistant/open-assistant"
 
+# Two-member workspace: the root crate (CLI + open_assistant lib) and the
+# Tauri desktop app under src-tauri/. The desktop crate path-depends on the
+# root, reusing the agent core in-process. resolver "2" is recommended by Tauri.
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
 # Library target: exposes the agent core for in-process reuse by the CLI
 # binary and the Tauri desktop app (src-tauri/).
 [lib]

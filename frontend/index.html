@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>openAssistant</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Left navigation rail (OpenHumans-style) -->
+    <nav class="rail" aria-label="Primary">
+      <div class="brand">
+        <div class="brand-mark">🦉</div>
+        <span class="brand-name">openAssistant</span>
+      </div>
+      <ul class="nav">
+        <li><button class="nav-item active" data-view="chat" data-testid="nav-chat"><span class="nav-ico">💬</span>Chat</button></li>
+        <li><button class="nav-item disabled" data-view="memory" data-testid="nav-memory" disabled><span class="nav-ico">🧠</span>Memory<span class="soon">soon</span></button></li>
+        <li><button class="nav-item disabled" data-view="integrations" data-testid="nav-integrations" disabled><span class="nav-ico">🔌</span>Integrations<span class="soon">soon</span></button></li>
+        <li><button class="nav-item disabled" data-view="skills" data-testid="nav-skills" disabled><span class="nav-ico">✨</span>Skills<span class="soon">soon</span></button></li>
+        <li><button class="nav-item" data-view="settings" data-testid="nav-settings"><span class="nav-ico">⚙️</span>Settings</button></li>
+      </ul>
+      <div class="rail-footer">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-model">—</span>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- CHAT VIEW -->
+      <section class="view" id="view-chat" data-testid="view-chat">
+        <header class="view-head">
+          <div>
+            <h1>Chat</h1>
+            <p class="subtitle" id="chat-subtitle">Talk to your assistant</p>
+          </div>
+          <button class="btn ghost" id="clear-btn" data-testid="clear-conversation">Clear</button>
+        </header>
+
+        <div id="apikey-banner" class="banner hidden" data-testid="apikey-banner">
+          <span>Add your API key in <strong>Settings</strong> to start chatting.</span>
+          <button class="btn small" data-view="settings" data-testid="banner-open-settings">Open Settings</button>
+        </div>
+
+        <div class="chat-body">
+          <div class="messages" id="message-list" data-testid="message-list" aria-live="polite"></div>
+          <div class="composer">
+            <textarea id="chat-input" data-testid="chat-input" rows="1"
+              placeholder="Message openAssistant…" autocomplete="off"></textarea>
+            <button class="btn primary" id="send-btn" data-testid="chat-send" aria-label="Send">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS VIEW -->
+      <section class="view hidden" id="view-settings" data-testid="view-settings">
+        <header class="view-head">
+          <div>
+            <h1>Settings</h1>
+            <p class="subtitle">Model &amp; provider configuration</p>
+          </div>
+        </header>
+
+        <form class="card form" id="settings-form" data-testid="settings-form" autocomplete="off">
+          <label class="field">
+            <span>Model</span>
+            <input type="text" id="cfg-model" data-testid="settings-model" placeholder="openrouter/owl-alpha" />
+          </label>
+          <label class="field">
+            <span>API base URL</span>
+            <input type="text" id="cfg-api-base" data-testid="settings-api-base" placeholder="https://openrouter.ai/api/v1" />
+          </label>
+          <label class="field">
+            <span>API key</span>
+            <input type="password" id="cfg-api-key" data-testid="settings-api-key" placeholder="Paste a new key to change it" />
+            <small class="hint" id="cfg-key-hint"></small>
+          </label>
+          <div class="field toggle">
+            <label class="switch">
+              <input type="checkbox" id="cfg-tools" data-testid="settings-tools-toggle" />
+              <span>Enable tools (shell &amp; file access)</span>
+            </label>
+            <small class="hint warn">When on, the model can run commands and read/write files on this machine. Off by default.</small>
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn primary" data-testid="settings-save">Save</button>
+            <span class="save-status" id="save-status" data-testid="save-status"></span>
+          </div>
+        </form>
+      </section>
+
+      <!-- PLACEHOLDER VIEWS -->
+      <section class="view hidden placeholder" id="view-memory"><div class="empty">🧠 Memory browser — coming soon</div></section>
+      <section class="view hidden placeholder" id="view-integrations"><div class="empty">🔌 Integrations — coming soon</div></section>
+      <section class="view hidden placeholder" id="view-skills"><div class="empty">✨ Skills — coming soon</div></section>
+    </main>
+  </div>
+
+  <div class="toast hidden" id="toast" data-testid="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

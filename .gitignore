@@ -17,3 +17,13 @@ Thumbs.db
 .env.local
 /local
 /local/*
+
+# Node / Playwright (desktop E2E)
+node_modules/
+tests/e2e/node_modules/
+test-results/
+playwright-report/
+.playwright-mcp/
+
+# Tauri generated output
+src-tauri/gen/

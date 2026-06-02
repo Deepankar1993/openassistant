@@ -190,3 +190,32 @@ fn config_path() -> PathBuf {
 pub fn data_dir_default() -> String {
     default_data_dir()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_yaml_round_trip_preserves_model_fields() {
+        let mut cfg = Config::default();
+        cfg.model.model = "anthropic/claude-opus".to_string();
+        cfg.model.api_base = "https://example.test/v1".to_string();
+        cfg.model.api_key = "secret-123".to_string();
+
+        let yaml = serde_yaml::to_string(&cfg).expect("serialize");
+        let back: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(back.model.model, "anthropic/claude-opus");
+        assert_eq!(back.model.api_base, "https://example.test/v1");
+        assert_eq!(back.model.api_key, "secret-123");
+        assert_eq!(back.model.provider, cfg.model.provider);
+    }
+
+    #[test]
+    fn defaults_are_sane() {
+        let cfg = Config::default();
+        assert_eq!(cfg.model.provider, "openrouter");
+        assert!(cfg.model.api_key.is_empty(), "ships with no api key");
+        assert!(cfg.model.api_base.starts_with("https://"));
+    }
+}

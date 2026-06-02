@@ -15,6 +15,12 @@ pub struct Agent {
     pub model: String,
     pub tools: Vec<ToolDefinition>,
     pub workspace_dir: String,
+    /// When false, the agent skips tool dispatch entirely and returns the raw
+    /// LLM text. Defaults to `true` for the CLI; the desktop app constructs the
+    /// agent with this off so a packaged binary never hands the model ungated
+    /// shell/file access without explicit user consent. See openspec change
+    /// `add-desktop-app`, task 2.10.
+    pub tools_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,11 +49,19 @@ impl Agent {
             model: model.into(),
             tools: Self::default_tools(),
             workspace_dir: crate::config::data_dir_default(),
+            tools_enabled: true,
         }
     }
 
     pub fn with_workspace(mut self, dir: impl Into<String>) -> Self {
         self.workspace_dir = dir.into();
+        self
+    }
+
+    /// Enable or disable tool dispatch. Front-ends (e.g. the desktop app) use
+    /// this to keep tool execution off by default until the user opts in.
+    pub fn with_tools_enabled(mut self, enabled: bool) -> Self {
+        self.tools_enabled = enabled;
         self
     }
 
@@ -79,8 +93,12 @@ impl Agent {
         // Call the LLM
         let response = self.call_llm(&messages).await?;
 
-        // Handle tool calls
-        let final_response = self.handle_tool_calls(response, ctx, session, &mem).await?;
+        // Handle tool calls (skipped when tool dispatch is disabled)
+        let final_response = if self.tools_enabled {
+            self.handle_tool_calls(response, ctx, session, &mem).await?
+        } else {
+            response
+        };
 
         // Add assistant response to session
         session.add_message(Message::assistant(&final_response));
@@ -164,6 +182,13 @@ impl Agent {
             "max_tokens": 8192,
         });
 
+        if config.model.api_key.trim().is_empty() {
+            anyhow::bail!(
+                "No API key configured. Set `model.api_key` (provider: {}) before chatting.",
+                config.model.provider
+            );
+        }
+
         let resp = client
             .post(format!("{}/chat/completions", config.model.api_base))
             .header("Authorization", format!("Bearer {}", config.model.api_key))
@@ -172,11 +197,27 @@ impl Agent {
             .send()
             .await?;
 
+        // Surface transport/HTTP errors instead of silently returning an empty
+        // string (the default empty api_key otherwise yields a blank reply).
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(500).collect();
+            anyhow::bail!("LLM request failed: HTTP {status} — {snippet}");
+        }
+
         let json: serde_json::Value = resp.json().await?;
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
             .to_string();
+
+        if content.trim().is_empty() {
+            anyhow::bail!(
+                "LLM returned an empty response (model `{}`). Check the model name and provider.",
+                self.model
+            );
+        }
 
         Ok(content)
     }
