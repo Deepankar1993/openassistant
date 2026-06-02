@@ -16,9 +16,9 @@
       </div>
       <ul class="nav">
         <li><button class="nav-item active" data-view="chat" data-testid="nav-chat"><span class="nav-ico">💬</span>Chat</button></li>
-        <li><button class="nav-item disabled" data-view="memory" data-testid="nav-memory" disabled><span class="nav-ico">🧠</span>Memory<span class="soon">soon</span></button></li>
-        <li><button class="nav-item disabled" data-view="integrations" data-testid="nav-integrations" disabled><span class="nav-ico">🔌</span>Integrations<span class="soon">soon</span></button></li>
-        <li><button class="nav-item disabled" data-view="skills" data-testid="nav-skills" disabled><span class="nav-ico">✨</span>Skills<span class="soon">soon</span></button></li>
+        <li><button class="nav-item" data-view="memory" data-testid="nav-memory"><span class="nav-ico">🧠</span>Memory</button></li>
+        <li><button class="nav-item" data-view="status" data-testid="nav-status"><span class="nav-ico">🔌</span>Status</button></li>
+        <li><button class="nav-item" data-view="skills" data-testid="nav-skills"><span class="nav-ico">✨</span>Skills</button></li>
         <li><button class="nav-item" data-view="settings" data-testid="nav-settings"><span class="nav-ico">⚙️</span>Settings</button></li>
       </ul>
       <div class="rail-footer">
@@ -54,51 +54,488 @@
         </div>
       </section>
 
-      <!-- SETTINGS VIEW -->
+      <!-- SETTINGS VIEW (two-column) -->
       <section class="view hidden" id="view-settings" data-testid="view-settings">
         <header class="view-head">
           <div>
             <h1>Settings</h1>
-            <p class="subtitle">Model &amp; provider configuration</p>
+            <p class="subtitle">Configure your assistant</p>
           </div>
         </header>
+        <div class="settings-layout">
+          <!-- Category nav -->
+          <nav class="settings-nav" data-testid="settings-nav" aria-label="Settings categories">
+            <button class="settings-nav-item active" data-section="model">Model</button>
+            <button class="settings-nav-item" data-section="general">General</button>
+            <button class="settings-nav-item" data-section="tools">Tools</button>
+            <button class="settings-nav-item" data-section="memory">Memory</button>
+            <button class="settings-nav-item" data-section="skills">Skills</button>
+            <button class="settings-nav-item" data-section="channels">Channels</button>
+            <button class="settings-nav-item" data-section="advanced">Advanced</button>
+          </nav>
+          <!-- Content panel -->
+          <div class="settings-content" id="settings-content">
+            <!-- Model section -->
+            <div class="settings-section active" id="settings-section-model">
+              <h2>Model</h2>
+              <form class="form" id="settings-form" data-testid="settings-form" autocomplete="off">
+                <label class="field">
+                  <span>Provider</span>
+                  <select id="cfg-provider" data-testid="settings-provider">
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <input type="text" id="cfg-model" data-testid="settings-model" placeholder="openrouter/owl-alpha" />
+                </label>
+                <label class="field">
+                  <span>API base URL</span>
+                  <input type="text" id="cfg-api-base" data-testid="settings-api-base" placeholder="https://openrouter.ai/api/v1" />
+                </label>
+                <label class="field">
+                  <span>API key</span>
+                  <div class="input-row">
+                    <input type="password" id="cfg-api-key" data-testid="settings-api-key" placeholder="Paste a new key to change it" />
+                    <button type="button" class="btn small" id="cfg-api-key-toggle" aria-label="Show/hide key">Show</button>
+                  </div>
+                  <small class="hint" id="cfg-key-hint"></small>
+                </label>
+                <div class="actions">
+                  <button type="button" class="btn primary" id="settings-test-btn" data-testid="settings-test-connection">Test connection</button>
+                  <div id="settings-conn-result" class="conn-result hidden" data-testid="settings-connection-result"></div>
+                </div>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-save">Save</button>
+                  <span class="save-status" id="save-status" data-testid="save-status"></span>
+                </div>
+              </form>
+            </div>
 
-        <form class="card form" id="settings-form" data-testid="settings-form" autocomplete="off">
-          <label class="field">
-            <span>Model</span>
-            <input type="text" id="cfg-model" data-testid="settings-model" placeholder="openrouter/owl-alpha" />
-          </label>
-          <label class="field">
-            <span>API base URL</span>
-            <input type="text" id="cfg-api-base" data-testid="settings-api-base" placeholder="https://openrouter.ai/api/v1" />
-          </label>
-          <label class="field">
-            <span>API key</span>
-            <input type="password" id="cfg-api-key" data-testid="settings-api-key" placeholder="Paste a new key to change it" />
-            <small class="hint" id="cfg-key-hint"></small>
-          </label>
-          <div class="field toggle">
-            <label class="switch">
-              <input type="checkbox" id="cfg-tools" data-testid="settings-tools-toggle" />
-              <span>Enable tools (shell &amp; file access)</span>
-            </label>
-            <small class="hint warn">When on, the model can run commands and read/write files on this machine. Off by default.</small>
+            <!-- General section -->
+            <div class="settings-section hidden" id="settings-section-general">
+              <h2>General</h2>
+              <form class="form" id="settings-general-form" autocomplete="off">
+                <label class="field">
+                  <span>Your name</span>
+                  <input type="text" id="cfg-user-name" data-testid="settings-user-name" placeholder="friend" maxlength="64" />
+                </label>
+                <div class="field">
+                  <span>Data directory</span>
+                  <div class="path-chip-row">
+                    <span class="path-chip" id="cfg-data-dir" data-testid="settings-data-dir"></span>
+                    <button type="button" class="btn small" id="settings-open-folder" data-testid="settings-open-folder">Open folder</button>
+                  </div>
+                </div>
+                <label class="field">
+                  <span>Log level</span>
+                  <select id="cfg-log-level" data-testid="settings-log-level">
+                    <option value="debug">debug</option>
+                    <option value="info">info</option>
+                    <option value="warn">warn</option>
+                    <option value="error">error</option>
+                  </select>
+                </label>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-general-save">Save</button>
+                  <span class="save-status" id="save-general-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Tools section -->
+            <div class="settings-section hidden" id="settings-section-tools">
+              <h2>Tools</h2>
+              <form class="form" id="settings-tools-form" autocomplete="off">
+                <div class="field toggle">
+                  <label class="switch">
+                    <input type="checkbox" id="cfg-tools" data-testid="settings-tools-toggle" />
+                    <span>Enable tools (shell &amp; file access)</span>
+                  </label>
+                  <small class="hint warn">Enables bash, file read/write, and edit tools. The assistant will ask before each command. Off by default.</small>
+                </div>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-tools-save">Save</button>
+                  <span class="save-status" id="save-tools-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Memory section -->
+            <div class="settings-section hidden" id="settings-section-memory" data-testid="settings-memory">
+              <h2>Memory</h2>
+              <form class="form" id="settings-memory-form" autocomplete="off">
+                <label class="field">
+                  <span>Max entries</span>
+                  <input type="number" id="cfg-memory-max" data-testid="settings-memory-max" min="0" step="10" />
+                </label>
+                <div class="field toggle">
+                  <label class="switch">
+                    <input type="checkbox" id="cfg-memory-fts" data-testid="settings-memory-fts" />
+                    <span>Full-text search (FTS5)</span>
+                  </label>
+                </div>
+                <div class="field">
+                  <span>Database path</span>
+                  <span class="path-chip" id="cfg-memory-db-path" data-testid="settings-memory-db-path"></span>
+                </div>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-memory-save">Save</button>
+                  <span class="save-status" id="save-memory-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Skills section -->
+            <div class="settings-section hidden" id="settings-section-skills">
+              <h2>Skills</h2>
+              <form class="form" id="settings-skills-form" autocomplete="off">
+                <div class="field">
+                  <span>Skills directories</span>
+                  <div id="cfg-skills-dirs" data-testid="settings-skills-dirs" class="chips-list"></div>
+                  <div class="input-row" style="margin-top:8px;">
+                    <input type="text" id="cfg-skills-dir-add" placeholder="Add directory path…" />
+                    <button type="button" class="btn small" id="skills-dir-add-btn">Add</button>
+                  </div>
+                </div>
+                <div class="field toggle">
+                  <label class="switch">
+                    <input type="checkbox" id="cfg-skills-auto-create" data-testid="settings-skills-auto-create" />
+                    <span>Auto-create skills directory</span>
+                  </label>
+                </div>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-skills-save">Save</button>
+                  <span class="save-status" id="save-skills-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Channels section -->
+            <div class="settings-section hidden" id="settings-section-channels" data-testid="settings-channels">
+              <h2>Channels</h2>
+              <div class="callout warn-callout" style="margin-bottom:18px;">
+                Gateway channels are experimental — the messaging server is not yet fully operational.
+              </div>
+              <form class="form" id="settings-channels-form" autocomplete="off">
+                <label class="field">
+                  <span>Discord token</span>
+                  <div class="input-row">
+                    <input type="password" id="cfg-discord-token" data-testid="settings-discord-token" placeholder="Paste to set or update" />
+                    <button type="button" class="btn small token-toggle" data-for="cfg-discord-token">Show</button>
+                  </div>
+                  <small class="hint" id="discord-token-hint"></small>
+                </label>
+                <label class="field">
+                  <span>Telegram token</span>
+                  <div class="input-row">
+                    <input type="password" id="cfg-telegram-token" data-testid="settings-telegram-token" placeholder="Paste to set or update" />
+                    <button type="button" class="btn small token-toggle" data-for="cfg-telegram-token">Show</button>
+                  </div>
+                  <small class="hint" id="telegram-token-hint"></small>
+                </label>
+                <label class="field">
+                  <span>Slack token</span>
+                  <div class="input-row">
+                    <input type="password" id="cfg-slack-token" data-testid="settings-slack-token" placeholder="Paste to set or update" />
+                    <button type="button" class="btn small token-toggle" data-for="cfg-slack-token">Show</button>
+                  </div>
+                  <small class="hint" id="slack-token-hint"></small>
+                </label>
+                <div class="field toggle">
+                  <label class="switch">
+                    <input type="checkbox" id="cfg-dm-pairing" data-testid="settings-dm-pairing" />
+                    <span>Enable DM pairing</span>
+                  </label>
+                </div>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-channels-save">Save</button>
+                  <span class="save-status" id="save-channels-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Advanced section -->
+            <div class="settings-section hidden" id="settings-section-advanced" data-testid="settings-advanced">
+              <h2>Advanced</h2>
+              <form class="form" id="settings-advanced-form" autocomplete="off">
+                <label class="field">
+                  <span>Vision provider</span>
+                  <select id="cfg-vision-provider" data-testid="settings-vision-provider">
+                    <option value="gemini_cli">Gemini CLI</option>
+                    <option value="none">None</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Gemini CLI path</span>
+                  <input type="text" id="cfg-gemini-path" data-testid="settings-gemini-path" placeholder="gemini" />
+                </label>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="settings-advanced-save">Save</button>
+                  <span class="save-status" id="save-advanced-status"></span>
+                </div>
+              </form>
+              <div style="margin-top:24px; padding-top:20px; border-top:1px solid var(--border);">
+                <button class="btn ghost" id="settings-rerun-wizard-btn" data-testid="settings-rerun-wizard" style="color:var(--primary);padding-left:0;">
+                  Re-run Setup Wizard
+                </button>
+                <div style="margin-top:16px;">
+                  <span class="hint">App version: </span>
+                  <span class="hint" id="settings-app-version" data-testid="settings-app-version"></span>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="actions">
-            <button type="submit" class="btn primary" data-testid="settings-save">Save</button>
-            <span class="save-status" id="save-status" data-testid="save-status"></span>
-          </div>
-        </form>
+        </div>
       </section>
 
-      <!-- PLACEHOLDER VIEWS -->
-      <section class="view hidden placeholder" id="view-memory"><div class="empty">🧠 Memory browser — coming soon</div></section>
-      <section class="view hidden placeholder" id="view-integrations"><div class="empty">🔌 Integrations — coming soon</div></section>
-      <section class="view hidden placeholder" id="view-skills"><div class="empty">✨ Skills — coming soon</div></section>
+      <!-- MEMORY VIEW -->
+      <section class="view hidden" id="view-memory" data-testid="view-memory">
+        <header class="view-head">
+          <div>
+            <h1>Memory</h1>
+            <p class="subtitle">Your stored knowledge and daily notes</p>
+          </div>
+        </header>
+        <div class="panel-layout">
+          <div class="panel-left" id="memory-panel-left">
+            <div class="panel-search">
+              <input type="search" id="memory-search" data-testid="memory-search" placeholder="Search memory…" autocomplete="off" />
+            </div>
+            <ul class="file-list" id="memory-list" data-testid="memory-list" aria-label="Memory files"></ul>
+          </div>
+          <div class="panel-right" id="memory-panel-right">
+            <div class="memory-toolbar hidden" id="memory-toolbar">
+              <span id="memory-file-label" class="memory-file-label"></span>
+              <button class="btn small primary" id="memory-save-btn" data-testid="memory-save">Save</button>
+            </div>
+            <textarea id="memory-content" data-testid="memory-content" class="memory-textarea" placeholder="Select a file on the left to view its content…" readonly></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- STATUS VIEW -->
+      <section class="view hidden" id="view-status" data-testid="view-status">
+        <header class="view-head">
+          <div>
+            <h1>Status</h1>
+            <p class="subtitle">System health and diagnostics</p>
+          </div>
+        </header>
+        <div class="status-body">
+          <!-- Status card -->
+          <div class="card" data-testid="status-card" id="status-card">
+            <h3>System Status</h3>
+            <div class="status-grid" id="status-grid"></div>
+            <div id="status-rerun-wizard-wrap" class="hidden" style="margin-top:14px;">
+              <button class="btn small" id="status-rerun-wizard-btn" data-testid="status-rerun-wizard" style="color:var(--primary);">
+                Run Setup Wizard
+              </button>
+            </div>
+          </div>
+
+          <!-- Doctor card -->
+          <div class="card" style="margin-top:0;" data-testid="doctor-card" id="doctor-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <h3>Diagnostics</h3>
+              <button class="btn small primary" id="doctor-run-btn" data-testid="doctor-run">Run Diagnostics</button>
+            </div>
+            <div id="doctor-results" data-testid="doctor-results" class="doctor-results"></div>
+          </div>
+
+          <!-- Agents card -->
+          <div class="card" style="margin-top:0;">
+            <h3>Agent Definitions</h3>
+            <p class="hint" style="margin-bottom:12px;">Agent execution is not yet available in the desktop app.</p>
+            <div id="agents-list" data-testid="agents-list" class="agents-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SKILLS VIEW -->
+      <section class="view hidden" id="view-skills" data-testid="view-skills">
+        <header class="view-head">
+          <div>
+            <h1>Skills</h1>
+            <p class="subtitle">Built-in and custom skill definitions</p>
+          </div>
+          <button class="btn primary" id="skills-new-btn" data-testid="skills-new">New Skill</button>
+        </header>
+        <div class="panel-layout">
+          <div class="panel-left" id="skills-panel-left">
+            <ul class="file-list" id="skills-list" data-testid="skills-list" aria-label="Skills"></ul>
+          </div>
+          <div class="panel-right" id="skills-panel-right">
+            <div id="skills-content" data-testid="skills-content" class="skills-content">
+              <div class="empty" style="margin:auto;color:var(--text-muted);">Select a skill to view its content.</div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
   <div class="toast hidden" id="toast" data-testid="toast"></div>
+
+  <!-- ONBOARDING WIZARD OVERLAY -->
+  <div class="wizard-overlay hidden" id="wizard-overlay" data-testid="onboard-wizard" role="dialog" aria-modal="true" aria-label="Setup wizard">
+    <div class="wizard-card">
+      <!-- Step progress bar -->
+      <div class="wizard-steps" data-testid="onboard-step-bar">
+        <div class="wizard-step" data-step="1">
+          <div class="step-dot"></div>
+          <span class="step-label">Workspace</span>
+        </div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-step="2">
+          <div class="step-dot"></div>
+          <span class="step-label">AI Provider</span>
+        </div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-step="3">
+          <div class="step-dot"></div>
+          <span class="step-label">Permissions</span>
+        </div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-step="4">
+          <div class="step-dot"></div>
+          <span class="step-label">Finish</span>
+        </div>
+      </div>
+
+      <!-- Screen 1: Workspace -->
+      <div class="wizard-screen" id="wizard-screen-1">
+        <h2 class="wizard-title">Where should I keep your data?</h2>
+        <p class="wizard-body">openAssistant stores your memory, conversations, and settings here. Your data stays local and private.</p>
+        <div class="field" style="margin-top:20px;">
+          <span class="path-chip" id="onboard-workspace-path" data-testid="onboard-workspace-path"></span>
+          <button type="button" class="btn small" id="onboard-workspace-change" data-testid="onboard-workspace-change" style="margin-top:10px;">Change folder</button>
+        </div>
+        <div class="writable-badge hidden" id="onboard-workspace-writable" data-testid="onboard-workspace-writable"></div>
+      </div>
+
+      <!-- Screen 2: AI Provider -->
+      <div class="wizard-screen hidden" id="wizard-screen-2">
+        <h2 class="wizard-title">Connect your AI.</h2>
+        <div class="provider-cards" id="onboard-provider-cards">
+          <label class="provider-card selected" data-testid="onboard-provider-radio" data-provider="openrouter">
+            <input type="radio" name="onboard-provider" value="openrouter" checked />
+            <div class="provider-card-body">
+              <span class="provider-card-name">OpenRouter</span>
+              <span class="provider-card-rec">Recommended</span>
+            </div>
+          </label>
+          <label class="provider-card" data-testid="onboard-provider-radio" data-provider="openai">
+            <input type="radio" name="onboard-provider" value="openai" />
+            <div class="provider-card-body">
+              <span class="provider-card-name">OpenAI</span>
+            </div>
+          </label>
+          <label class="provider-card" data-testid="onboard-provider-radio" data-provider="custom">
+            <input type="radio" name="onboard-provider" value="custom" />
+            <div class="provider-card-body">
+              <span class="provider-card-name">Custom</span>
+            </div>
+          </label>
+        </div>
+        <div class="field" style="margin-top:16px;" id="onboard-api-base-wrap">
+          <span>API base URL</span>
+          <input type="text" id="onboard-api-base" data-testid="onboard-api-base" />
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <span>Model</span>
+          <input type="text" id="onboard-model" data-testid="onboard-model" />
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <span>API key</span>
+          <div class="input-row">
+            <input type="password" id="onboard-api-key" data-testid="onboard-api-key" placeholder="sk-…" autocomplete="new-password" />
+            <button type="button" class="btn small" id="onboard-api-key-toggle" aria-label="Show/hide key">Show</button>
+          </div>
+          <a href="#" id="onboard-get-key-link" class="hint" style="margin-top:6px;display:inline-block;color:var(--primary);">Get an API key ↗</a>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:12px;">
+          <button type="button" class="btn" id="onboard-test-connection" data-testid="onboard-test-connection">Test connection</button>
+          <div id="onboard-connection-result" class="conn-result hidden" data-testid="onboard-connection-result"></div>
+        </div>
+      </div>
+
+      <!-- Screen 3: Permissions -->
+      <div class="wizard-screen hidden" id="wizard-screen-3">
+        <h2 class="wizard-title">How much access should openAssistant have?</h2>
+        <div class="tools-cards" id="onboard-tools-cards">
+          <div class="tools-card" id="onboard-tools-card-a" data-testid="onboard-tools-card-a" tabindex="0" role="radio" aria-checked="false">
+            <div class="tools-card-icon">🔒</div>
+            <div class="tools-card-content">
+              <strong>Chat only</strong>
+              <p>No file or shell access. Safer for most users.</p>
+            </div>
+          </div>
+          <div class="tools-card" id="onboard-tools-card-b" data-testid="onboard-tools-card-b" tabindex="0" role="radio" aria-checked="false">
+            <div class="tools-card-icon">💻</div>
+            <div class="tools-card-content">
+              <strong>Enable tools</strong>
+              <p>The assistant can run shell commands and read/write files. You'll confirm each command.</p>
+            </div>
+          </div>
+        </div>
+        <div class="callout warn-callout hidden" id="onboard-tools-consent" data-testid="onboard-tools-consent" style="margin-top:14px;">
+          You can change this any time in Settings. The assistant will ask before each command.
+        </div>
+      </div>
+
+      <!-- Screen 4: Identity & Finish -->
+      <div class="wizard-screen hidden" id="wizard-screen-4">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;">
+          <h2 class="wizard-title" style="margin-bottom:0;">One last thing — what should I call you?</h2>
+          <button type="button" class="btn ghost" id="onboard-skip-name" style="font-size:13px;color:var(--text-muted);">Skip</button>
+        </div>
+        <div class="field" style="margin-top:20px;">
+          <input type="text" id="onboard-username" data-testid="onboard-username" placeholder="friend" maxlength="64" />
+        </div>
+        <div class="status-pills" style="margin-top:24px;">
+          <div class="status-pill pending" id="onboard-pill-config" data-testid="onboard-pill-config">
+            <span class="pill-icon">⏳</span> Config saved
+          </div>
+          <div class="status-pill pending" id="onboard-pill-datadir" data-testid="onboard-pill-datadir">
+            <span class="pill-icon">⏳</span> Data directory ready
+          </div>
+          <div class="status-pill pending" id="onboard-pill-vision" data-testid="onboard-pill-vision">
+            <span class="pill-icon">⏳</span> Vision tools
+          </div>
+        </div>
+      </div>
+
+      <!-- Wizard navigation footer -->
+      <div class="wizard-footer">
+        <button type="button" class="btn" id="wizard-back-btn" style="visibility:hidden;">Back</button>
+        <button type="button" class="btn primary" id="wizard-continue-btn">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW SKILL MODAL -->
+  <div class="modal-overlay hidden" id="skill-modal" data-testid="skill-modal" role="dialog" aria-modal="true" aria-label="New skill">
+    <div class="modal-card">
+      <h3 style="margin-bottom:16px;">New Skill</h3>
+      <div class="form">
+        <label class="field">
+          <span>Skill name</span>
+          <input type="text" id="skill-modal-name" data-testid="skill-modal-name" placeholder="my-skill" maxlength="64" />
+        </label>
+        <label class="field">
+          <span>Content (Markdown)</span>
+          <textarea id="skill-modal-content" data-testid="skill-modal-content" rows="8" style="font-family:monospace;font-size:13px;resize:vertical;"></textarea>
+        </label>
+      </div>
+      <div class="actions" style="margin-top:16px;">
+        <button class="btn primary" id="skill-modal-save" data-testid="skill-modal-save">Create</button>
+        <button class="btn ghost" id="skill-modal-cancel" data-testid="skill-modal-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
