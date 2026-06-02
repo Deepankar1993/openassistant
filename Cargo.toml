@@ -21,6 +21,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # CLI / TUI
 clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
@@ -50,6 +52,8 @@ base64 = "0.22"
 toml = "0.8"
 rand = "0.8"
 urlencoding = "2"
+syntect = "5"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -24,6 +24,12 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
+    /// Interactive terminal UI (TUI)
+    Tui,
+    /// Web-based UI
+    Web {
+        #[arg(long, default_value = "3000")] port: u16,
+    },
     Chat,
     Gateway,
     Onboard,
@@ -45,6 +51,25 @@ enum Commands {
         #[arg(long)] name: Option<String>,
         #[arg(long)] content: Option<String>,
     },
+    /// Manage sub-agents
+    Agents {
+        #[arg(long)] action: Option<String>,
+        #[arg(long)] name: Option<String>,
+    },
+    /// Manage plugins
+    Plugins {
+        #[arg(long)] action: Option<String>,
+        #[arg(long)] name: Option<String>,
+    },
+    /// Run a workflow
+    Workflow {
+        name: String,
+    },
+    /// Manage checkpoints
+    Checkpoint {
+        #[arg(long)] action: Option<String>,
+        #[arg(long)] id: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -58,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Chat => {
-            ui::chat::run_chat().await?;
+            ui::tui::run_tui().await?;
         }
         Commands::Gateway => {
             gateway::start_gateway().await?;
@@ -188,6 +213,94 @@ async fn main() -> anyhow::Result<()> {
                     println!("  openassistant skills --action list");
                     println!("  openassistant skills --action read --name SKILL.md");
                     println!("  openassistant skills --action create --name SKILL.md --content \"text\"");
+                }
+            }
+        }
+        Commands::Tui => {
+            ui::tui::run_tui().await?;
+        }
+        Commands::Web { port } => {
+            ui::web::run_web(port).await?;
+        }
+        Commands::Agents { action, name } => {
+            let config = config::load().await?;
+            let workspace = &config.general.data_dir;
+            match action.as_deref() {
+                Some("list") => {
+                    let mut orchestrator = crate::core::subagent::SubAgentOrchestrator::new();
+                    let _ = orchestrator.load_definitions(&format!("{}/.claude/agents", workspace));
+                    println!("📋 Sub-agent definitions:");
+                    for def in orchestrator.list_definitions() {
+                        println!("  🤖 {} — {}", def.name, def.description);
+                    }
+                }
+                Some("load") => {
+                    if let Some(n) = name {
+                        let mut orchestrator = crate::core::subagent::SubAgentOrchestrator::new();
+                        let _ = orchestrator.load_definitions(&format!("{}/.claude/agents", workspace));
+                        if let Some(def) = orchestrator.get_definition(&n) {
+                            println!("Loaded agent: {} — {}", def.name, def.description);
+                        } else {
+                            println!("Agent '{}' not found", n);
+                        }
+                    }
+                }
+                _ => {
+                    println!("Agent commands:");
+                    println!("  openassistant agents --action list");
+                    println!("  openassistant agents --action load --name <agent-name>");
+                }
+            }
+        }
+        Commands::Plugins { action, name } => {
+            let config = config::load().await?;
+            let workspace = &config.general.data_dir;
+            match action.as_deref() {
+                Some("list") => {
+                    let mut marketplace = crate::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
+                    let _ = marketplace.load_installed();
+                    println!("{}", marketplace.format_status());
+                }
+                Some("enable") => {
+                    if let Some(n) = name {
+                        let mut marketplace = crate::core::plugins::PluginMarketplace::new(&format!("{}/.claude/plugins", workspace));
+                        let _ = marketplace.load_installed();
+                        marketplace.set_enabled(&n, true);
+                        println!("Plugin '{}' enabled", n);
+                    }
+                }
+                _ => {
+                    println!("Plugin commands:");
+                    println!("  openassistant plugins --action list");
+                    println!("  openassistant plugins --action enable --name <plugin-name>");
+                }
+            }
+        }
+        Commands::Workflow { name } => {
+            let mut engine = crate::core::workflows::WorkflowEngine::new();
+            for wf in crate::core::workflows::built_in_workflows() {
+                engine.register_workflow(wf);
+            }
+            match engine.execute(&name).await {
+                Ok(result) => println!("✅ {}", result),
+                Err(e) => println!("❌ Workflow error: {}", e),
+            }
+        }
+        Commands::Checkpoint { action, id } => {
+            let config = config::load().await?;
+            let workspace = &config.general.data_dir;
+            let mut store = crate::core::checkpoint::CheckpointStore::new();
+            match action.as_deref() {
+                Some("list") => {
+                    if let Some(session_id) = id {
+                        println!("{}", store.format_checkpoints(&session_id));
+                    } else {
+                        println!("Usage: openassistant checkpoint --action list --id <session-id>");
+                    }
+                }
+                _ => {
+                    println!("Checkpoint commands:");
+                    println!("  openassistant checkpoint --action list --id <session-id>");
                 }
             }
         }
