@@ -1,33 +1,34 @@
 // src/gateway/discord.rs
 //! Discord gateway (Hermes-style) via `serenity`.
 //!
-//! Behavior:
-//! - **@mention** the bot in a channel (or post in the configured **home**
-//!   channel) → the bot reacts ✅ and spawns a **thread** off that message,
-//!   then replies inside the thread.
-//! - Messages **inside a bot-created thread** continue that thread's
-//!   conversation — no mention needed.
-//! - **DMs** are answered directly (threads aren't available in DMs).
-//! - Text **commands** (allowed users only): `set home` / `!home`,
-//!   `unset home`, `!new` (reset this conversation), `!help`.
-//!
-//! Each thread / DM / home conversation is an isolated `Session`. The lock guard
-//! is dropped before `Agent::process().await` (never held across it).
+//! - **@mention** the bot (or post in the **home** channel) → react ✅, spawn a
+//!   **thread**, reply inside it. Messages inside a bot-owned thread continue
+//!   that conversation. **DMs** are answered directly.
+//! - **Slash commands**: `/ask`, `/home`, `/unset_home`, `/new`, `/help`
+//!   (registered per-guild on connect). Text commands still work too.
+//! - **Persistence**: owned threads + each conversation's `Session` are stored
+//!   in `discord.db`, so threads survive restarts.
+//! - **Self-improvement review**: when `gateway.discord_review_hours > 0`, a
+//!   periodic task posts a short reflection to the home channel and appends it
+//!   to memory.
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use serenity::all::{
-    ChannelId, Client, Context as SerenityContext, CreateThread, EventHandler, GatewayIntents,
-    Message as DiscordMessage, ReactionType, Ready,
+    ChannelId, Client, CommandDataOptionValue, CommandOptionType, Context as SerenityContext,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateThread, EventHandler, GatewayIntents, Http,
+    Interaction, Message as DiscordMessage, ReactionType, Ready,
 };
 use serenity::async_trait;
 
+use super::discord_store::DiscordStore;
 use crate::config::Config;
-use crate::core::agent::Agent;
+use crate::core::agent::{call_llm_raw, Agent};
 use crate::core::persona::{FullContext, Persona};
 use crate::core::session::Session;
 
@@ -35,18 +36,11 @@ const MAX_SESSION_MESSAGES: usize = 40;
 const DISCORD_MAX_LEN: usize = 1900;
 const THREAD_NAME_MAX: usize = 90;
 
-struct Convo {
-    ctx: FullContext,
-    session: Session,
-}
-
 struct Handler {
     agent: Arc<Agent>,
-    /// Conversations keyed by channel/thread id.
-    sessions: Arc<Mutex<HashMap<u64, Convo>>>,
-    /// Thread ids the bot created (continue without a mention).
+    store: Arc<Mutex<DiscordStore>>,
+    /// In-memory cache of bot-owned thread ids (seeded from the store on start).
     threads: Arc<Mutex<HashSet<u64>>>,
-    /// Optional home channel id (top-level messages here auto-thread).
     home_channel: Arc<Mutex<Option<u64>>>,
     allowed_users: Vec<String>,
     dm_policy: String,
@@ -54,28 +48,36 @@ struct Handler {
 }
 
 impl Handler {
-    fn new_convo(&self, key: &str) -> Convo {
+    fn fresh_ctx(&self) -> FullContext {
         let mut ctx = FullContext::new();
         ctx.persona = Persona::load_or_default(&self.data_dir);
-        Convo { ctx, session: Session::new("discord", key) }
+        ctx
     }
 
-    /// Run text through the agent for a given conversation key. Locks only to
-    /// take/return the conversation — never across the agent await.
-    async fn respond(&self, key: u64, text: &str) -> String {
-        let mut convo = {
-            let mut map = self.sessions.lock().await;
-            map.remove(&key).unwrap_or_else(|| self.new_convo(&key.to_string()))
-        };
-        let reply = match self.agent.process(text, &mut convo.ctx, &mut convo.session).await {
+    /// Run text through the agent for a conversation, loading/saving its session
+    /// from the store. The store lock is only held for the brief load/save — never
+    /// across `Agent::process().await`.
+    async fn respond(&self, conv_id: u64, text: &str) -> String {
+        let mut session = {
+            let store = self.store.lock().await;
+            store.load_session(conv_id).ok().flatten()
+        }
+        .unwrap_or_else(|| Session::new("discord", conv_id.to_string()));
+
+        let mut ctx = self.fresh_ctx();
+        let reply = match self.agent.process(text, &mut ctx, &mut session).await {
             Ok(r) => r,
             Err(e) => format!("⚠️ {}", e),
         };
-        let len = convo.session.messages.len();
+
+        let len = session.messages.len();
         if len > MAX_SESSION_MESSAGES {
-            convo.session.messages.drain(0..(len - MAX_SESSION_MESSAGES));
+            session.messages.drain(0..(len - MAX_SESSION_MESSAGES));
         }
-        self.sessions.lock().await.insert(key, convo);
+        {
+            let store = self.store.lock().await;
+            let _ = store.save_session(conv_id, &session);
+        }
         reply
     }
 
@@ -92,32 +94,44 @@ impl Handler {
         }
     }
 
-    /// Handle a text command. Returns true if the message was a command.
+    async fn set_home(&self, channel: u64) {
+        *self.home_channel.lock().await = Some(channel);
+        if let Ok(mut cfg) = crate::config::load().await {
+            cfg.gateway.discord_home_channel = channel.to_string();
+            let _ = crate::config::save(&cfg).await;
+        }
+    }
+
+    async fn clear_home(&self) {
+        *self.home_channel.lock().await = None;
+        if let Ok(mut cfg) = crate::config::load().await {
+            cfg.gateway.discord_home_channel = String::new();
+            let _ = crate::config::save(&cfg).await;
+        }
+    }
+
+    async fn reset_conversation(&self, conv_id: u64) {
+        let store = self.store.lock().await;
+        let _ = store.clear_conversation(conv_id);
+    }
+
+    /// Handle a prefix/text command. Returns true if the message was a command.
     async fn try_command(&self, ctx: &SerenityContext, msg: &DiscordMessage, content: &str) -> bool {
         let norm = content.trim().to_lowercase();
         let channel = msg.channel_id;
         match norm.as_str() {
             "set home" | "!home" | "!sethome" => {
-                *self.home_channel.lock().await = Some(channel.get());
-                // Persist so it survives restarts.
-                if let Ok(mut cfg) = crate::config::load().await {
-                    cfg.gateway.discord_home_channel = channel.get().to_string();
-                    let _ = crate::config::save(&cfg).await;
-                }
-                self.send_chunked(ctx, channel, "🏠 Home channel set. I'll start a thread for new messages here.").await;
+                self.set_home(channel.get()).await;
+                self.send_chunked(ctx, channel, "🏠 Home channel set. New messages here will start a thread.").await;
                 true
             }
             "unset home" | "!unsethome" => {
-                *self.home_channel.lock().await = None;
-                if let Ok(mut cfg) = crate::config::load().await {
-                    cfg.gateway.discord_home_channel = String::new();
-                    let _ = crate::config::save(&cfg).await;
-                }
+                self.clear_home().await;
                 self.send_chunked(ctx, channel, "🏠 Home channel cleared.").await;
                 true
             }
             "!new" | "!reset" => {
-                self.sessions.lock().await.remove(&channel.get());
+                self.reset_conversation(channel.get()).await;
                 self.send_chunked(ctx, channel, "🧹 Started a fresh conversation here.").await;
                 true
             }
@@ -132,12 +146,20 @@ impl Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: SerenityContext, ready: Ready) {
+    async fn ready(&self, ctx: SerenityContext, ready: Ready) {
         info!("Discord connected as {}", ready.user.name);
         info!(
-            "Note: enable the MESSAGE CONTENT intent in the Developer Portal, and grant the bot \
-             Create Public Threads + Send Messages in Threads + Add Reactions, or thread mode won't work."
+            "Note: enable the MESSAGE CONTENT intent and grant Create Public Threads + \
+             Send Messages in Threads + Add Reactions, or thread mode won't work."
         );
+
+        // Register slash commands per-guild (instant, unlike global commands).
+        let commands = slash_commands();
+        for g in &ready.guilds {
+            if let Err(e) = g.id.set_commands(&ctx.http, commands.clone()).await {
+                warn!("Could not register slash commands in guild {}: {}", g.id, e);
+            }
+        }
     }
 
     async fn message(&self, ctx: SerenityContext, msg: DiscordMessage) {
@@ -151,8 +173,6 @@ impl EventHandler for Handler {
         if content.is_empty() {
             return;
         }
-
-        // Commands first.
         if self.try_command(&ctx, &msg, &content).await {
             return;
         }
@@ -160,7 +180,6 @@ impl EventHandler for Handler {
         let channel_id = msg.channel_id.get();
         let is_dm = msg.guild_id.is_none();
 
-        // 1) DM → answer directly.
         if is_dm {
             self.react_ack(&ctx, &msg).await;
             let reply = self.respond(channel_id, &content).await;
@@ -168,7 +187,6 @@ impl EventHandler for Handler {
             return;
         }
 
-        // 2) Message inside a bot-created thread → continue it.
         if self.threads.lock().await.contains(&channel_id) {
             self.react_ack(&ctx, &msg).await;
             let reply = self.respond(channel_id, &content).await;
@@ -176,7 +194,6 @@ impl EventHandler for Handler {
             return;
         }
 
-        // 3) Mention OR home channel → spawn a thread and reply inside it.
         let mentioned = msg.mentions_me(&ctx.http).await.unwrap_or(false);
         let in_home = *self.home_channel.lock().await == Some(channel_id);
         if mentioned || in_home {
@@ -184,12 +201,16 @@ impl EventHandler for Handler {
             let title = thread_title(&content);
             match msg
                 .channel_id
-                .create_thread_from_message(&ctx.http, msg.id, CreateThread::new(title))
+                .create_thread_from_message(&ctx.http, msg.id, CreateThread::new(title.clone()))
                 .await
             {
                 Ok(thread) => {
                     let tid = thread.id.get();
                     self.threads.lock().await.insert(tid);
+                    {
+                        let store = self.store.lock().await;
+                        let _ = store.mark_thread(tid, &title);
+                    }
                     let reply = self.respond(tid, &content).await;
                     self.send_chunked(&ctx, thread.id, &reply).await;
                 }
@@ -200,17 +221,99 @@ impl EventHandler for Handler {
                 }
             }
         }
-        // Otherwise: not addressed to the bot — ignore.
+    }
+
+    async fn interaction_create(&self, ctx: SerenityContext, interaction: Interaction) {
+        let Interaction::Command(cmd) = interaction else { return };
+
+        if !gate(&cmd.user.id.get().to_string(), &self.allowed_users, &self.dm_policy) {
+            let _ = cmd
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("You're not on this bot's allowlist.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+
+        let channel_id = cmd.channel_id.get();
+        match cmd.data.name.as_str() {
+            "ask" => {
+                let message = cmd
+                    .data
+                    .options
+                    .iter()
+                    .find(|o| o.name == "message")
+                    .and_then(|o| match &o.value {
+                        CommandDataOptionValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                // Defer (LLM call may exceed the 3s interaction deadline).
+                if cmd
+                    .create_response(&ctx.http, CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let reply = self.respond(channel_id, &message).await;
+                for chunk in chunk_message(&reply) {
+                    let _ = cmd
+                        .create_followup(&ctx.http, CreateInteractionResponseFollowup::new().content(chunk))
+                        .await;
+                }
+            }
+            "home" => {
+                self.set_home(channel_id).await;
+                respond_ephemeral(&ctx, &cmd, "🏠 Home channel set.").await;
+            }
+            "unset_home" => {
+                self.clear_home().await;
+                respond_ephemeral(&ctx, &cmd, "🏠 Home channel cleared.").await;
+            }
+            "new" => {
+                self.reset_conversation(channel_id).await;
+                respond_ephemeral(&ctx, &cmd, "🧹 Started a fresh conversation here.").await;
+            }
+            "help" => respond_ephemeral(&ctx, &cmd, HELP_TEXT).await,
+            _ => {}
+        }
     }
 }
 
-const HELP_TEXT: &str = "🦉 openAssistant — Discord commands:\n\
-• @mention me in a channel → I'll spawn a thread and we continue there\n\
-• `set home` / `!home` → make this channel home (new messages here auto-thread)\n\
-• `unset home` → clear the home channel\n\
-• `!new` → start a fresh conversation in this thread/DM\n\
-• `!help` → this message\n\
-DM me directly for a 1:1 chat (no thread).";
+async fn respond_ephemeral(ctx: &SerenityContext, cmd: &serenity::all::CommandInteraction, text: &str) {
+    let _ = cmd
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(text).ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+fn slash_commands() -> Vec<CreateCommand> {
+    vec![
+        CreateCommand::new("ask").description("Ask openAssistant").add_option(
+            CreateCommandOption::new(CommandOptionType::String, "message", "Your message").required(true),
+        ),
+        CreateCommand::new("home").description("Set this channel as the bot's home"),
+        CreateCommand::new("unset_home").description("Clear the home channel"),
+        CreateCommand::new("new").description("Start a fresh conversation here"),
+        CreateCommand::new("help").description("Show openAssistant help"),
+    ]
+}
+
+const HELP_TEXT: &str = "🦉 openAssistant — Discord:\n\
+• @mention me (or post in the home channel) → I spawn a thread and we continue there\n\
+• Slash: `/ask`, `/home`, `/unset_home`, `/new`, `/help`\n\
+• Text: `set home`/`!home`, `unset home`, `!new`, `!help`\n\
+• DM me for a 1:1 chat. Threads & history persist across restarts.";
 
 /// Start the Discord gateway. Blocks until the client disconnects.
 pub async fn start(config: Config) -> Result<()> {
@@ -225,6 +328,10 @@ pub async fn start(config: Config) -> Result<()> {
         );
     }
 
+    let store = DiscordStore::open_default()?;
+    let owned = store.owned_threads().unwrap_or_default();
+    info!("Loaded {} persisted Discord thread(s).", owned.len());
+
     let agent = Agent::new(config.model.model.clone())
         .with_workspace(config.general.data_dir.clone())
         .with_tools_enabled(config.tools.enabled);
@@ -233,8 +340,8 @@ pub async fn start(config: Config) -> Result<()> {
 
     let handler = Handler {
         agent: Arc::new(agent),
-        sessions: Arc::new(Mutex::new(HashMap::new())),
-        threads: Arc::new(Mutex::new(HashSet::new())),
+        store: Arc::new(Mutex::new(store)),
+        threads: Arc::new(Mutex::new(owned)),
         home_channel: Arc::new(Mutex::new(home)),
         allowed_users: config.gateway.discord_allowed_users.clone(),
         dm_policy: if config.gateway.dm_policy.is_empty() {
@@ -245,17 +352,86 @@ pub async fn start(config: Config) -> Result<()> {
         data_dir: config.general.data_dir.clone(),
     };
 
-    let intents = GatewayIntents::GUILD_MESSAGES
+    // GUILDS is needed so `ready.guilds` is populated for per-guild slash-command
+    // registration; the rest receive messages + their content.
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     info!("Starting Discord client…");
     let mut client = Client::builder(&token, intents).event_handler(handler).await?;
+
+    // Periodic self-improvement review (cron-style) posting to the home channel.
+    if config.gateway.discord_review_hours > 0 {
+        let http = client.http.clone();
+        tokio::spawn(review_loop(http, config.clone()));
+    }
+
     client.start().await?;
     Ok(())
 }
 
-/// Derive a thread name from the first line of the message (Discord caps at 100).
+/// Periodically post a short self-improvement reflection to the home channel and
+/// append it to memory. Re-reads config each tick so the home channel/interval
+/// can change without a restart.
+async fn review_loop(http: Arc<Http>, initial: Config) {
+    let hours = initial.gateway.discord_review_hours.max(1);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(hours * 3600));
+    tick.tick().await; // consume the immediate first tick — wait a full period first
+    loop {
+        tick.tick().await;
+        let cfg = match crate::config::load().await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if cfg.gateway.discord_review_hours == 0 {
+            continue;
+        }
+        let Some(home) = cfg.gateway.discord_home_channel.trim().parse::<u64>().ok() else {
+            continue;
+        };
+        let review = generate_review(&cfg).await;
+        let msg = format!("🪞 **Self-improvement review:** {}", review);
+        for chunk in chunk_message(&msg) {
+            let _ = ChannelId::new(home).say(&http, chunk).await;
+        }
+    }
+}
+
+/// Produce a brief reflection from memory, append it to the daily note (so
+/// "memory updated" is literally true), and return a one-liner for posting.
+async fn generate_review(cfg: &Config) -> String {
+    let ws = crate::core::memory::MemoryWorkspace::from_data_dir(&cfg.general.data_dir);
+    let lt = ws.read_long_term();
+    let today = ws.read_today();
+    let trunc = |s: String, n: usize| s.chars().take(n).collect::<String>();
+
+    let prompt = format!(
+        "Write a 2-3 sentence self-improvement reflection: what you learned recently and one thing \
+         to improve. Be concise and concrete.\n\n# MEMORY\n{}\n\n# TODAY\n{}",
+        trunc(lt, 2000),
+        trunc(today, 2000)
+    );
+
+    let client = reqwest::Client::new();
+    let (base, key, model) = crate::config::resolve_provider(cfg, "text");
+    let summary = call_llm_raw(
+        &client,
+        base,
+        key,
+        model,
+        &[serde_json::json!({ "role": "user", "content": prompt })],
+    )
+    .await
+    .unwrap_or_default();
+
+    let summary = summary.trim().to_string();
+    let line = if summary.is_empty() { "Memory updated.".to_string() } else { summary };
+    let _ = ws.append_daily(&format!("Self-improvement review: {}", line));
+    line
+}
+
 fn thread_title(content: &str) -> String {
     let first = content.lines().next().unwrap_or(content).trim();
     let mut t: String = first.chars().take(THREAD_NAME_MAX).collect();
@@ -265,8 +441,6 @@ fn thread_title(content: &str) -> String {
     t
 }
 
-/// Whether a user may talk to the bot. An explicit allowlist is authoritative;
-/// with no allowlist, only `dm_policy = "open"` admits everyone.
 fn gate(user_id: &str, allowed: &[String], dm_policy: &str) -> bool {
     if !allowed.is_empty() {
         return is_allowed(user_id, allowed);
@@ -281,7 +455,6 @@ pub fn is_allowed(user_id: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|id| id == user_id || id == "*")
 }
 
-/// Split a reply into Discord-sized chunks, preferring line boundaries.
 fn chunk_message(s: &str) -> Vec<String> {
     if s.trim().is_empty() {
         return vec!["(empty response)".to_string()];
@@ -331,6 +504,12 @@ mod tests {
         assert_eq!(thread_title("hello world"), "hello world");
         assert!(thread_title(&"x".repeat(200)).chars().count() <= THREAD_NAME_MAX);
         assert_eq!(thread_title("   "), "conversation");
+    }
+
+    #[test]
+    fn slash_commands_present() {
+        let names: Vec<_> = slash_commands().iter().map(|_| ()).collect();
+        assert_eq!(names.len(), 5);
     }
 
     #[test]

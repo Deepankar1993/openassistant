@@ -1,5 +1,6 @@
 // src/gateway/mod.rs
 pub mod discord;
+pub mod discord_store;
 pub mod telegram;
 pub mod slack;
 pub mod webchat;

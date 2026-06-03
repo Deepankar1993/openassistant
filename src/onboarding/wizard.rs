@@ -91,6 +91,7 @@ pub async fn run_wizard() -> Result<()> {
             discord_token: discord_token.clone(),
             discord_allowed_users: vec![],
             discord_home_channel: String::new(),
+            discord_review_hours: 0,
             telegram_token: telegram_token.clone(),
             slack_token: String::new(),
             slack_signing_secret: String::new(),
