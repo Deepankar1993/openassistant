@@ -123,6 +123,7 @@ pub async fn run_wizard() -> Result<()> {
         tools: crate::config::ToolsConfig::default(),
         providers: vec![],
         routing: crate::config::RoutingConfig::default(),
+        claude: crate::config::ClaudeBridgeConfig::default(),
     };
 
     crate::config::save(&config).await?;

@@ -22,6 +22,51 @@ pub struct Config {
     /// so an absent/empty `routing` block reproduces single-model behavior.
     #[serde(default)]
     pub routing: RoutingConfig,
+    /// Bridge to a locally-installed Claude Code CLI (`claude`). When enabled,
+    /// openAssistant can delegate turns to `claude -p` with session continuity.
+    #[serde(default)]
+    pub claude: ClaudeBridgeConfig,
+}
+
+/// Configuration for the Claude Code CLI bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeBridgeConfig {
+    /// Master switch for the bridge (the `claude` tool + Discord routing).
+    pub enabled: bool,
+    /// Path/name of the claude binary.
+    pub bin: String,
+    /// Working directory claude runs in (the project to operate on). Empty ⇒
+    /// the current directory, falling back to the data dir.
+    pub workspace: String,
+    /// Optional model alias/name (e.g. "opus", "sonnet"); empty ⇒ claude default.
+    pub model: String,
+    /// Permission mode: default | acceptEdits | plan | bypassPermissions | dontAsk | auto.
+    pub permission_mode: String,
+    /// If true, pass `--dangerously-skip-permissions` (full autonomy — use with care).
+    pub skip_permissions: bool,
+    /// Extra text appended to claude's system prompt (persona/tone).
+    pub append_system_prompt: String,
+    /// Per-call timeout in seconds.
+    pub timeout_secs: u64,
+    /// When the bridge is enabled, route Discord conversations through it by default.
+    pub discord_default: bool,
+}
+
+impl Default for ClaudeBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bin: "claude".to_string(),
+            workspace: String::new(),
+            model: String::new(),
+            permission_mode: "acceptEdits".to_string(),
+            skip_permissions: false,
+            append_system_prompt: String::new(),
+            timeout_secs: 300,
+            discord_default: true,
+        }
+    }
 }
 
 /// A named, OpenAI-compatible API provider (base URL + key).
@@ -251,6 +296,19 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         "gateway.telegram_token" => config.gateway.telegram_token = value.to_string(),
         "gateway.slack_token" => config.gateway.slack_token = value.to_string(),
         "security.dm_pairing" => config.security.dm_pairing = value.parse().unwrap_or(true),
+        "claude.enabled" => config.claude.enabled = value.parse().unwrap_or(false),
+        "claude.bin" => config.claude.bin = value.to_string(),
+        "claude.workspace" => config.claude.workspace = value.to_string(),
+        "claude.model" => config.claude.model = value.to_string(),
+        "claude.permission_mode" => config.claude.permission_mode = value.to_string(),
+        "claude.skip_permissions" => config.claude.skip_permissions = value.parse().unwrap_or(false),
+        "claude.append_system_prompt" => config.claude.append_system_prompt = value.to_string(),
+        "claude.discord_default" => config.claude.discord_default = value.parse().unwrap_or(true),
+        "claude.timeout_secs" => {
+            config.claude.timeout_secs = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid timeout '{}' (expected seconds)", value))?
+        }
         _ => tracing::warn!("Unknown config key: {}", key),
     }
     save(&config).await?;

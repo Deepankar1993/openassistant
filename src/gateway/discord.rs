@@ -29,6 +29,7 @@ use serenity::async_trait;
 use super::discord_store::DiscordStore;
 use crate::config::Config;
 use crate::core::agent::{call_llm_raw, Agent};
+use crate::core::claude_bridge::ClaudeBridge;
 use crate::core::persona::{FullContext, Persona};
 use crate::core::session::Session;
 
@@ -38,6 +39,9 @@ const THREAD_NAME_MAX: usize = 90;
 
 struct Handler {
     agent: Arc<Agent>,
+    /// When set, conversations are driven by the local Claude Code CLI instead
+    /// of the built-in agent loop.
+    bridge: Option<Arc<ClaudeBridge>>,
     store: Arc<Mutex<DiscordStore>>,
     /// In-memory cache of bot-owned thread ids (seeded from the store on start).
     threads: Arc<Mutex<HashSet<u64>>>,
@@ -54,10 +58,33 @@ impl Handler {
         ctx
     }
 
-    /// Run text through the agent for a conversation, loading/saving its session
-    /// from the store. The store lock is only held for the brief load/save — never
-    /// across `Agent::process().await`.
+    /// Run text through the Claude Code CLI, persisting its session id per
+    /// conversation so the thread maps to one continuous Claude session.
+    async fn respond_via_claude(&self, bridge: &ClaudeBridge, conv_id: u64, text: &str) -> String {
+        let resume = { self.store.lock().await.get_claude_session(conv_id).ok().flatten() };
+        match bridge.run(text, resume.as_deref()).await {
+            Ok(r) => {
+                if let Some(sid) = &r.session_id {
+                    let store = self.store.lock().await;
+                    let _ = store.set_claude_session(conv_id, sid);
+                }
+                if r.text.trim().is_empty() {
+                    "…(Claude returned no text — try rephrasing)".to_string()
+                } else {
+                    r.text
+                }
+            }
+            Err(e) => format!("⚠️ Claude bridge error: {}", e),
+        }
+    }
+
+    /// Run text through the conversation. Uses the Claude bridge when enabled,
+    /// otherwise the built-in agent. The store lock is only held for the brief
+    /// load/save — never across `.await` of the model/bridge call.
     async fn respond(&self, conv_id: u64, text: &str) -> String {
+        if let Some(bridge) = self.bridge.clone() {
+            return self.respond_via_claude(&bridge, conv_id, text).await;
+        }
         let mut session = {
             let store = self.store.lock().await;
             store.load_session(conv_id).ok().flatten()
@@ -338,8 +365,26 @@ pub async fn start(config: Config) -> Result<()> {
 
     let home = config.gateway.discord_home_channel.trim().parse::<u64>().ok();
 
+    // Build the Claude bridge if enabled, injecting persona + a human tone so
+    // replies feel like a friendly teammate rather than a task runner.
+    let bridge = if config.claude.enabled && config.claude.discord_default {
+        let persona = Persona::load_or_default(&config.general.data_dir);
+        let human = build_human_prompt(&persona, &config.claude.append_system_prompt);
+        let b = ClaudeBridge::from_config(&config.claude, &config.general.data_dir).with_system_prompt(human);
+        if b.available().await {
+            info!("Claude bridge ON — Discord conversations route through `claude` (cwd: {}).", b.workspace());
+            Some(Arc::new(b))
+        } else {
+            warn!("Claude bridge enabled but the `claude` binary was not found; using the built-in agent.");
+            None
+        }
+    } else {
+        None
+    };
+
     let handler = Handler {
         agent: Arc::new(agent),
+        bridge,
         store: Arc::new(Mutex::new(store)),
         threads: Arc::new(Mutex::new(owned)),
         home_channel: Arc::new(Mutex::new(home)),
@@ -430,6 +475,23 @@ async fn generate_review(cfg: &Config) -> String {
     let line = if summary.is_empty() { "Memory updated.".to_string() } else { summary };
     let _ = ws.append_daily(&format!("Self-improvement review: {}", line));
     line
+}
+
+/// Compose a human, persona-flavored system prompt appended to Claude's, so
+/// bridged replies feel like a warm teammate rather than a task runner.
+fn build_human_prompt(persona: &Persona, extra: &str) -> String {
+    let mut p = format!(
+        "You are {} (tone: {}). {} You're chatting with your user on Discord. \
+         Reply like a warm, friendly human teammate — natural, concise, and personable. \
+         Avoid robotic preambles like 'As an AI'. Mirror the user's tone. When you do real \
+         work (code, files, commands), briefly say what you did in plain language.",
+        persona.name, persona.tone, persona.personality
+    );
+    if !extra.trim().is_empty() {
+        p.push_str("\n\n");
+        p.push_str(extra);
+    }
+    p
 }
 
 fn thread_title(content: &str) -> String {

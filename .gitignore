@@ -27,3 +27,10 @@ playwright-report/
 
 # Tauri generated output
 src-tauri/gen/
+
+# gateway run logs (local)
+/gw*.log
+
+# gateway run logs (local)
+/gw*.log
+

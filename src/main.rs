@@ -23,6 +23,13 @@ enum Commands {
         #[arg(long, default_value = "3000")] port: u16,
     },
     Chat,
+    /// Send a one-shot prompt through the local Claude Code CLI bridge
+    Claude {
+        /// The prompt to send to `claude -p`
+        prompt: String,
+        /// Resume a prior Claude session id for continuity
+        #[arg(long)] resume: Option<String>,
+    },
     /// Run the messaging gateway (WebChat + Discord/Telegram/Slack if configured)
     Gateway {
         /// Print the gateway readiness report and exit without starting servers.
@@ -118,6 +125,30 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Chat => {
             ui::tui::run_tui().await?;
+        }
+        Commands::Claude { prompt, resume } => {
+            let config = config::load().await?;
+            let bridge = open_assistant::core::claude_bridge::ClaudeBridge::from_config(
+                &config.claude,
+                &config.general.data_dir,
+            );
+            if !bridge.available().await {
+                println!("❌ `claude` binary not found. Set it with `config --key claude.bin --value <path>`.");
+            } else {
+                println!("⏳ Running claude (cwd: {})…", bridge.workspace());
+                match bridge.run(&prompt, resume.as_deref()).await {
+                    Ok(r) => {
+                        println!("\n{}", r.text);
+                        if let Some(sid) = r.session_id {
+                            println!("\n[session: {} — resume with `--resume {}`]", sid, sid);
+                        }
+                        if let Some(cost) = r.cost_usd {
+                            println!("[cost: ${:.4}]", cost);
+                        }
+                    }
+                    Err(e) => println!("❌ {}", e),
+                }
+            }
         }
         Commands::Gateway { check } => {
             let config = config::load().await?;

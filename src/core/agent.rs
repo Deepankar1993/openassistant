@@ -274,6 +274,7 @@ impl Agent {
                 "goal_deliberate" => {
                     self.handle_goal_deliberate(&tool_call.arguments).await
                 }
+                "claude" => self.handle_claude(&tool_call.arguments).await,
                 "goal_create" => self.handle_goal_create(&tool_call.arguments).await,
                 "goal_subgoal" => self.handle_goal_subgoal(&tool_call.arguments).await,
                 "goal_task" => self.handle_goal_task(&tool_call.arguments).await,
@@ -381,6 +382,22 @@ impl Agent {
         }
 
         Ok(deliberator.format_deliberation(&goal_id))
+    }
+
+    // ── Claude Code CLI bridge ──
+
+    async fn handle_claude(&self, args: &serde_json::Value) -> Result<String> {
+        let prompt = args["prompt"].as_str().unwrap_or("").trim();
+        if prompt.is_empty() {
+            return Ok("Provide a 'prompt' for the claude tool.".to_string());
+        }
+        let resume = args["resume"].as_str();
+        let config = crate::config::load().await?;
+        let bridge = super::claude_bridge::ClaudeBridge::from_config(&config.claude, &self.workspace_dir);
+        match bridge.run(prompt, resume).await {
+            Ok(r) => Ok(r.text),
+            Err(e) => Ok(format!("Claude bridge error: {}", e)),
+        }
     }
 
     // ── Goal / subgoal tools (persisted via GoalStore) ──
@@ -672,6 +689,11 @@ impl Agent {
                 name: "task".to_string(),
                 description: "Spawn sub-agent. Args: {\"subagent_type\": \"Explore|Plan|General\", \"description\": \"...\", \"prompt\": \"...\"}".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {"subagent_type": {"type": "string"}, "description": {"type": "string"}, "prompt": {"type": "string"}}}),
+            },
+            ToolDefinition {
+                name: "claude".to_string(),
+                description: "Delegate a task to the local Claude Code CLI (agentic coding/file/automation work on the configured project). Args: {\"prompt\": \"...\", \"resume\": \"<session-id, optional>\"}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"prompt": {"type": "string"}, "resume": {"type": "string"}}}),
             },
             ToolDefinition {
                 name: "goal_create".to_string(),
