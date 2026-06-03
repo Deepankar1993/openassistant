@@ -72,7 +72,12 @@ rand = "0.8"
 urlencoding = "2"
 syntect = "5"
 unicode-width = "0.2"
+# Atomic JSON persistence for the goal store (NamedTempFile::persist).
+tempfile = "3"
+
+# Discord gateway. default-features off + rustls so we don't pull a second TLS
+# stack alongside reqwest's; minimal feature set for receiving + replying.
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "http", "builder", "rustls_backend"] }
 
 [dev-dependencies]
-tempfile = "3"
 tokio-test = "0.4"

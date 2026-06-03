@@ -31,7 +31,17 @@ enum Commands {
     },
     Status,
     Doctor,
-    Update,
+    /// Update openAssistant from its source checkout (git pull + cargo build).
+    /// Source checkouts only; set OPENASSISTANT_SRC if the checkout is not
+    /// discoverable from the running executable.
+    Update {
+        /// Only check for pending updates; do not apply them.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt and apply directly.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Read/update MEMORY.md directly
     Memory {
         #[arg(long)] action: Option<String>,
@@ -53,14 +63,41 @@ enum Commands {
         #[arg(long)] action: Option<String>,
         #[arg(long)] name: Option<String>,
     },
-    /// Run a workflow
+    /// Run a workflow (real LLM step execution; runs persisted to workflows.db)
     Workflow {
         name: String,
+        /// Input text passed as context to the workflow's root steps
+        #[arg(long)] input: Option<String>,
     },
-    /// Manage checkpoints
-    Checkpoint {
+    /// Manage goals and subgoals (persisted in goals.json)
+    Goals {
+        /// list | create | subgoal | task
         #[arg(long)] action: Option<String>,
+        /// Goal id-prefix or title (for subgoal/task)
+        #[arg(long)] goal: Option<String>,
+        /// Subgoal id-prefix or title (for task)
+        #[arg(long)] subgoal: Option<String>,
+        /// Title of the goal/subgoal/task being created
+        #[arg(long)] title: Option<String>,
+        /// Optional description
+        #[arg(long)] description: Option<String>,
+    },
+    /// Manage checkpoints (persisted in checkpoints.db)
+    Checkpoint {
+        /// list | create | restore
+        #[arg(long)] action: Option<String>,
+        /// Checkpoint id (for restore)
         #[arg(long)] id: Option<String>,
+        /// Session id (defaults to a stable hash of the workspace path)
+        #[arg(long)] session: Option<String>,
+        /// Workspace directory (defaults to the current directory)
+        #[arg(long)] workspace: Option<String>,
+        /// Comma-separated file paths relative to the workspace (for create)
+        #[arg(long)] files: Option<String>,
+        /// Checkpoint description (for create)
+        #[arg(long)] description: Option<String>,
+        /// Overwrite files modified since the checkpoint (for restore)
+        #[arg(long)] force: bool,
     },
 }
 
@@ -115,9 +152,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             run_diagnostics().await?;
         }
-        Commands::Update => {
-            println!("Use 'cargo update && cargo build --release' to update from source.");
-            println!("Or run 'openassistant onboard' to reconfigure.");
+        Commands::Update { check, yes } => {
+            run_update(check, yes).await?;
         }
         Commands::Memory { action, content } => {
             let config = config::load().await?;
@@ -268,36 +304,219 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Workflow { name } => {
-            let mut engine = open_assistant::core::workflows::WorkflowEngine::new();
-            for wf in open_assistant::core::workflows::built_in_workflows() {
+        Commands::Goals { action, goal, subgoal, title, description } => {
+            use open_assistant::core::goal_store::GoalStore;
+            let mut store = GoalStore::open_default()?;
+            match action.as_deref() {
+                Some("create") => {
+                    let t = title.unwrap_or_else(|| "Untitled Goal".to_string());
+                    let id = store.create_goal(&t, description.as_deref().unwrap_or(""))?;
+                    println!("🎯 Created goal '{}' [{}]", t, &id[..id.len().min(8)]);
+                }
+                Some("subgoal") => match (goal, title) {
+                    (Some(g), Some(t)) => match store.resolve_goal_id(&g) {
+                        Some(gid) => {
+                            store.add_subgoal(&gid, &t, description.as_deref().unwrap_or(""))?;
+                            println!("➕ Added subgoal '{}' to goal [{}]", t, &gid[..gid.len().min(8)]);
+                        }
+                        None => println!("No goal matching '{}'.", g),
+                    },
+                    _ => println!("Usage: goals --action subgoal --goal <id|title> --title \"...\""),
+                },
+                Some("task") => match (goal, subgoal, title) {
+                    (Some(g), Some(sg), Some(t)) => match store.resolve_goal_id(&g) {
+                        Some(gid) => {
+                            let sgid = store.board.get_goal(&gid).and_then(|gl| {
+                                gl.subgoals
+                                    .iter()
+                                    .find(|s| s.id == sg || s.id.starts_with(&sg) || s.title.eq_ignore_ascii_case(&sg))
+                                    .map(|s| s.id.clone())
+                            });
+                            match sgid {
+                                Some(sid) => {
+                                    store.add_task(&gid, &sid, &t)?;
+                                    println!("✅ Added task '{}' under subgoal [{}]", t, &sid[..sid.len().min(8)]);
+                                }
+                                None => println!("No subgoal matching '{}'.", sg),
+                            }
+                        }
+                        None => println!("No goal matching '{}'.", g),
+                    },
+                    _ => println!("Usage: goals --action task --goal <id|title> --subgoal <id|title> --title \"...\""),
+                },
+                Some("list") | None => println!("{}", store.format()),
+                _ => {
+                    println!("Goal commands:");
+                    println!("  openassistant goals --action list");
+                    println!("  openassistant goals --action create --title \"...\" [--description \"...\"]");
+                    println!("  openassistant goals --action subgoal --goal <id|title> --title \"...\" [--description \"...\"]");
+                    println!("  openassistant goals --action task --goal <id|title> --subgoal <id|title> --title \"...\"");
+                }
+            }
+        }
+        Commands::Workflow { name, input } => {
+            use open_assistant::core::workflows::{built_in_workflows, WorkflowEngine};
+            let config = std::sync::Arc::new(config::load().await?);
+            let db_path = format!("{}/workflows.db", config.general.data_dir);
+            let mut engine = WorkflowEngine::new_with_config(config, &db_path)?;
+            for wf in built_in_workflows() {
                 engine.register_workflow(wf);
             }
-            match engine.execute(&name).await {
+            match engine.execute(&name, input.as_deref()).await {
                 Ok(result) => println!("✅ {}", result),
                 Err(e) => println!("❌ Workflow error: {}", e),
             }
         }
-        Commands::Checkpoint { action, id } => {
+        Commands::Checkpoint { action, id, session, workspace, files, description, force } => {
+            use open_assistant::core::checkpoint::CheckpointStore;
+            use sha2::Digest;
             let config = config::load().await?;
-            let workspace = &config.general.data_dir;
-            let mut store = open_assistant::core::checkpoint::CheckpointStore::new();
+            let workspace_dir = workspace.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| config.general.data_dir.clone())
+            });
+            // --session defaults to a stable hash of the absolute workspace path.
+            let session_id = session.unwrap_or_else(|| {
+                let abs = std::fs::canonicalize(&workspace_dir)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| workspace_dir.clone());
+                let h = format!("{:x}", sha2::Sha256::digest(abs.as_bytes()));
+                format!("ws_{}", &h[..12])
+            });
+
+            let mut store = CheckpointStore::open_default()?;
             match action.as_deref() {
-                Some("list") => {
-                    if let Some(session_id) = id {
-                        println!("{}", store.format_checkpoints(&session_id));
+                Some("create") => {
+                    let file_list: Vec<String> = files
+                        .as_deref()
+                        .map(|f| f.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                        .unwrap_or_default();
+                    if file_list.is_empty() {
+                        println!("Provide --files a.rs,b.rs to checkpoint.");
                     } else {
-                        println!("Usage: openassistant checkpoint --action list --id <session-id>");
+                        let desc = description.unwrap_or_else(|| "manual checkpoint".to_string());
+                        let cp_id = store.create_checkpoint(&session_id, &desc, &workspace_dir, &file_list)?;
+                        println!("📸 Created checkpoint {} (session {}) with {} file(s).", cp_id, session_id, file_list.len());
                     }
+                }
+                Some("restore") => match id {
+                    Some(cp_id) => {
+                        let report = store.restore_checkpoint(&cp_id, &workspace_dir, force)?;
+                        let skip_note = if report.skipped.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", skipped {} (modified — re-run with --force to overwrite)", report.skipped.len())
+                        };
+                        println!("✅ Restored {} file(s){}.", report.restored.len(), skip_note);
+                        for f in &report.skipped {
+                            println!("  ⚠️  skipped: {}", f);
+                        }
+                    }
+                    None => println!("Usage: openassistant checkpoint --action restore --id <checkpoint-id> [--workspace <dir>] [--force]"),
+                },
+                Some("list") => {
+                    println!("{}", store.format_checkpoints(&session_id));
                 }
                 _ => {
                     println!("Checkpoint commands:");
-                    println!("  openassistant checkpoint --action list --id <session-id>");
+                    println!("  openassistant checkpoint --action list [--session <id> | --workspace <dir>]");
+                    println!("  openassistant checkpoint --action create --files a.rs,b.rs [--workspace <dir>] [--description \"...\"]");
+                    println!("  openassistant checkpoint --action restore --id <checkpoint-id> [--workspace <dir>] [--force]");
                 }
             }
         }
     }
 
+    Ok(())
+}
+
+/// Locate the source checkout to update. Order: `OPENASSISTANT_SRC` env var
+/// (primary — an installed binary in `~/.cargo/bin` cannot be walked back to
+/// the source), then walk up from the running executable looking for a
+/// `Cargo.toml` whose package is `open-assistant`, then error.
+fn detect_source_dir() -> anyhow::Result<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("OPENASSISTANT_SRC") {
+        let p = std::path::PathBuf::from(dir);
+        if p.join("Cargo.toml").exists() {
+            return Ok(p);
+        }
+        anyhow::bail!("OPENASSISTANT_SRC is set to '{}' but no Cargo.toml is there.", p.display());
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent().map(|p| p.to_path_buf());
+        while let Some(dir) = cur {
+            let manifest = dir.join("Cargo.toml");
+            if manifest.exists() {
+                if let Ok(text) = std::fs::read_to_string(&manifest) {
+                    if text.contains("name = \"open-assistant\"") {
+                        return Ok(dir);
+                    }
+                }
+            }
+            cur = dir.parent().map(|p| p.to_path_buf());
+        }
+    }
+
+    anyhow::bail!(
+        "Could not locate the openAssistant source checkout. `update` works only \
+         for source installs. Set OPENASSISTANT_SRC to your checkout directory, e.g.\n  \
+         OPENASSISTANT_SRC=/path/to/openAssistant openassistant update"
+    )
+}
+
+/// Real `update` flow over the existing `SelfUpdater` (git pull + cargo build).
+async fn run_update(check_only: bool, assume_yes: bool) -> anyhow::Result<()> {
+    use open_assistant::core::self_update::SelfUpdater;
+
+    let src = detect_source_dir()?;
+    println!("openAssistant v{} — source: {}", env!("CARGO_PKG_VERSION"), src.display());
+
+    let updater = SelfUpdater::new(src.to_string_lossy().to_string());
+
+    let pending = updater.check_pending().await?;
+    if pending.is_empty() {
+        println!("✅ Already up to date.");
+        return Ok(());
+    }
+
+    println!("\n{} pending commit(s) upstream:", pending.len());
+    for line in &pending {
+        println!("  • {}", line);
+    }
+
+    if check_only {
+        println!("\nRun `openassistant update` to apply.");
+        return Ok(());
+    }
+
+    if !assume_yes {
+        print!("\nApply update (git pull --rebase + cargo build --release)? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    if updater.is_dirty().await? {
+        anyhow::bail!("Working tree is dirty — commit or stash your changes before updating.");
+    }
+
+    println!("Building… (this can take a few minutes)");
+    let built = updater.update_from_source().await?;
+    if built {
+        println!("✅ Update complete. A fresh binary was written to target/release/.");
+        println!("   • Restart openAssistant to run the new version (the current process keeps v{}).", env!("CARGO_PKG_VERSION"));
+        println!("   • If you installed via `cargo install`, run `cargo install --path .` from {} to update your PATH.", src.display());
+    } else {
+        println!("✅ Already up to date.");
+    }
     Ok(())
 }
 

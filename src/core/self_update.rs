@@ -27,35 +27,56 @@ impl SelfUpdater {
         }
     }
 
-    /// Check if an update is available (compare with crates.io or git)
+    /// Check if an update is available on crates.io.
+    ///
+    /// DEAD PATH: `open-assistant` is not published to crates.io, so this used
+    /// to always return `Ok(None)` — indistinguishable from "no update", a
+    /// silent lie. It now fails explicitly so callers don't trust it; use the
+    /// git-based [`check_pending`](Self::check_pending) instead.
     pub async fn check_update(&self) -> Result<Option<String>> {
-        // Check current version
-        let current = env!("CARGO_PKG_VERSION");
+        anyhow::bail!(
+            "crates.io update check is unavailable: open-assistant is not published. \
+             Use `openassistant update --check` (git-based) instead."
+        )
+    }
 
-        // Try to get latest from crates.io
-        let client = reqwest::Client::new();
-        match client
-            .get(format!("https://crates.io/api/v1/crates/open-assistant"))
-            .header("User-Agent", format!("openAssistant/{}", current))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(latest) = json["crate"]["newest_version"].as_str() {
-                        if latest != current {
-                            info!("Update available: {} → {}", current, latest);
-                            return Ok(Some(latest.to_string()));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("Could not check crates.io: {}", e);
-            }
+    /// List commits on the upstream branch that are not in the local HEAD.
+    /// Runs `git fetch` then `git log HEAD..@{u} --oneline`. Returns the commit
+    /// summary lines (empty = already up to date).
+    pub async fn check_pending(&self) -> Result<Vec<String>> {
+        let fetch = run_cmd("git", &["fetch", "--quiet"], &self.workspace_dir).await?;
+        if !fetch.status.success() {
+            return Err(anyhow::anyhow!(
+                "git fetch failed: {}",
+                String::from_utf8_lossy(&fetch.stderr).trim()
+            ));
         }
+        // `@{u}` (upstream of the current branch) is more robust than
+        // `origin/HEAD`, which is often unset on fresh clones.
+        let log = run_cmd("git", &["log", "HEAD..@{u}", "--oneline"], &self.workspace_dir).await?;
+        if !log.status.success() {
+            return Err(anyhow::anyhow!(
+                "git log failed (no upstream tracking branch?): {}",
+                String::from_utf8_lossy(&log.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&log.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
 
-        Ok(None)
+    /// Whether the working tree has uncommitted changes (`git status --porcelain`).
+    pub async fn is_dirty(&self) -> Result<bool> {
+        let out = run_cmd("git", &["status", "--porcelain"], &self.workspace_dir).await?;
+        if !out.status.success() {
+            return Err(anyhow::anyhow!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
     }
 
     /// Update the agent from source (git pull + cargo build)
@@ -154,6 +175,10 @@ impl SelfUpdater {
 }
 
 async fn run_cmd(cmd: &str, args: &[&str], cwd: &str) -> Result<Output> {
+    // Propagate both the JoinError (blocking task panicked) and the io::Error
+    // (process failed to launch) with `??`. The previous `.unwrap_or(Ok(default
+    // Output))` turned a panicked `cargo build` into a fake-success Output with
+    // a default (success-looking) ExitStatus — a correctness hole.
     let output = tokio::task::spawn_blocking({
         let cwd = cwd.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -164,11 +189,10 @@ async fn run_cmd(cmd: &str, args: &[&str], cwd: &str) -> Result<Output> {
                 .current_dir(&cwd)
                 .output()
         }
-    }).await.unwrap_or(Ok(std::process::Output {
-        status: std::process::ExitStatus::default(),
-        stdout: Vec::new(),
-        stderr: vec![],
-    }))?;
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("'{}' task failed to join: {}", cmd, e))?
+    .map_err(|e| anyhow::anyhow!("failed to launch '{}': {} (is it on PATH?)", cmd, e))?;
 
     if !output.status.success() {
         warn!("Command failed: {} {:?}: {}", cmd, args,

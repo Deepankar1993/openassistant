@@ -4,22 +4,30 @@
 //!
 //! ── CAPABILITY HONESTY TABLE ────────────────────────────────────────────────
 //! The desktop app surfaces ONLY core features that are verified end-to-end. The
-//! following are STUBS in the core and MUST NOT be given a working UI affordance
-//! (no "Run"/"Spawn"/"Install"/"Update"/"Restore"/"Activate" button). Read-only
-//! listing is allowed where noted.
+//! following are STILL STUBS in the core and MUST NOT be given a working UI
+//! affordance (no "Run"/"Spawn"/"Install"/"Activate" button). Read-only listing
+//! is allowed where noted.
 //!
 //!   Feature                 | Why not surfaced                              | Source
 //!   ------------------------|-----------------------------------------------|------------------------------
 //!   Sub-agent execution     | execute_subagent() returns a placeholder       | core/subagent.rs:267-283
-//!   Workflow execution      | steps emit "Step X completed", no real work    | core/workflows.rs:141-161
-//!   Checkpoint restore      | CheckpointStore is in-memory only              | core/checkpoint.rs:31
 //!   Plugin marketplace      | Marketplace source always Err(...)             | core/plugins.rs:216
-//!   Self-update             | Update just prints cargo instructions          | main.rs:119
 //!   Skill activation toggle | activate_skill() not read by Agent::process    | skills/engine.rs
-//!   Live gateway dashboard  | Discord/Telegram/Slack are placeholders        | gateway/
-//!   goal/plan/perm handlers | return placeholder text                        | core/agent.rs:323,399,409
+//!   plan/perm handlers      | return placeholder text                        | core/agent.rs
+//!   Telegram/Slack gateway  | still placeholders (Discord is now real)       | gateway/
 //!
 //! `list_agents` (read-only definitions) is the only sub-agent surface allowed.
+//!
+//! ── NOW REAL IN THE CORE (CLI-first; desktop surface deferred, see openspec
+//!    change `complete-core-features-and-integrations`) ─────────────────────────
+//! These are wired end-to-end on the CLI but intentionally NOT yet surfaced in
+//! the desktop this cycle; a later desktop change can add UI against them:
+//!   Workflow execution  — real LLM steps + persistence (core/workflows.rs).
+//!   Checkpoint restore  — persistent SQLite + SHA-256-guarded restore (core/checkpoint.rs).
+//!   Self-update         — real git source update via `openassistant update`
+//!                         (a desktop button still needs tauri-plugin-updater + an endpoint).
+//!   Discord gateway     — real serenity handler (gateway/discord.rs).
+//!   goal_deliberate     — real per-role LLM deliberation + persisted goals/subgoals.
 //! ────────────────────────────────────────────────────────────────────────────
 
 mod commands;

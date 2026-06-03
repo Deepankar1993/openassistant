@@ -14,6 +14,42 @@ pub struct Config {
     pub vision: VisionConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Named API providers for multi-model routing. Empty by default; legacy
+    /// configs (which lack this key) deserialize to an empty list.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
+    /// Per-modality model routing. Empty routes fall through to `model` (below),
+    /// so an absent/empty `routing` block reproduces single-model behavior.
+    #[serde(default)]
+    pub routing: RoutingConfig,
+}
+
+/// A named, OpenAI-compatible API provider (base URL + key).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderEntry {
+    pub name: String,
+    pub api_base: String,
+    pub api_key: String,
+}
+
+/// A single modality's route: which provider + which model.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModalityRoute {
+    pub provider: String,
+    pub model: String,
+}
+
+/// Routing map across modalities. `text` is dispatched today; `vision`,
+/// `image_gen`, and `video` are parsed and stored but not yet dispatched.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RoutingConfig {
+    pub text: ModalityRoute,
+    pub vision: ModalityRoute,
+    pub image_gen: ModalityRoute,
+    pub video: ModalityRoute,
 }
 
 /// Tool-execution posture. The desktop app constructs the agent from this so a
@@ -180,6 +216,14 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         "model.model" => config.model.model = value.to_string(),
         "model.api_key" => config.model.api_key = value.to_string(),
         "gateway.discord_token" => config.gateway.discord_token = value.to_string(),
+        "gateway.discord_allowed_users" => {
+            config.gateway.discord_allowed_users = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        "gateway.dm_policy" => config.gateway.dm_policy = value.to_string(),
         "gateway.telegram_token" => config.gateway.telegram_token = value.to_string(),
         "gateway.slack_token" => config.gateway.slack_token = value.to_string(),
         "security.dm_pairing" => config.security.dm_pairing = value.parse().unwrap_or(true),
@@ -198,6 +242,28 @@ pub async fn show_all() -> Result<()> {
 pub async fn check() -> Result<()> {
     let _ = load().await?;
     Ok(())
+}
+
+/// Resolve the `(api_base, api_key, model)` to use for a given modality
+/// (`"text"`, `"vision"`, `"image_gen"`, `"video"`).
+///
+/// Routing is strictly opt-in: a route is honored only when its `provider`
+/// matches an entry in `providers[]` AND its `model` is set. Otherwise this
+/// falls through to the legacy `model` block, so an empty `routing` reproduces
+/// the single-model behavior byte-for-byte.
+pub fn resolve_provider<'a>(config: &'a Config, modality: &str) -> (&'a str, &'a str, &'a str) {
+    let route = match modality {
+        "vision" => &config.routing.vision,
+        "image_gen" => &config.routing.image_gen,
+        "video" => &config.routing.video,
+        _ => &config.routing.text,
+    };
+    if !route.provider.is_empty() && !route.model.is_empty() {
+        if let Some(p) = config.providers.iter().find(|p| p.name == route.provider) {
+            return (&p.api_base, &p.api_key, &route.model);
+        }
+    }
+    (&config.model.api_base, &config.model.api_key, &config.model.model)
 }
 
 fn config_path() -> PathBuf {
@@ -235,5 +301,71 @@ mod tests {
         assert_eq!(cfg.model.provider, "openrouter");
         assert!(cfg.model.api_key.is_empty(), "ships with no api key");
         assert!(cfg.model.api_base.starts_with("https://"));
+    }
+
+    #[test]
+    fn legacy_config_without_routing_loads_and_falls_through() {
+        // A config.yaml written before multi-model routing existed: no
+        // `providers` / `routing` keys at all.
+        let legacy = "
+general:
+  data_dir: /tmp/oa
+  log_level: info
+  name: openAssistant
+  user_name: User
+model:
+  provider: openrouter
+  model: openrouter/owl-alpha
+  api_key: legacy-key
+  api_base: https://openrouter.ai/api/v1
+gateway:
+  discord_token: ''
+  discord_allowed_users: []
+  telegram_token: ''
+  slack_token: ''
+  slack_signing_secret: ''
+  webhook_port: 0
+  dm_policy: pairing
+memory:
+  db_path: /tmp/oa/memory.db
+  max_entries: 100000
+  fts_enabled: true
+skills:
+  dirs: []
+  auto_create: true
+security:
+  dm_pairing: true
+  allow_from: []
+vision:
+  provider: gemini-cli
+  gemini_path: gemini
+";
+        let cfg: Config = serde_yaml::from_str(legacy).expect("legacy config must still load");
+        assert!(cfg.providers.is_empty());
+        // Empty routing => resolve_provider returns the legacy model block.
+        let (base, key, model) = resolve_provider(&cfg, "text");
+        assert_eq!(base, "https://openrouter.ai/api/v1");
+        assert_eq!(key, "legacy-key");
+        assert_eq!(model, "openrouter/owl-alpha");
+    }
+
+    #[test]
+    fn populated_routing_selects_provider() {
+        let mut cfg = Config::default();
+        cfg.providers.push(ProviderEntry {
+            name: "openai".into(),
+            api_base: "https://api.openai.com/v1".into(),
+            api_key: "sk-openai".into(),
+        });
+        cfg.routing.text = ModalityRoute { provider: "openai".into(), model: "gpt-4o".into() };
+
+        let (base, key, model) = resolve_provider(&cfg, "text");
+        assert_eq!(base, "https://api.openai.com/v1");
+        assert_eq!(key, "sk-openai");
+        assert_eq!(model, "gpt-4o");
+
+        // An unconfigured modality still falls through to the legacy block.
+        let (_, _, vmodel) = resolve_provider(&cfg, "vision");
+        assert_eq!(vmodel, cfg.model.model);
     }
 }

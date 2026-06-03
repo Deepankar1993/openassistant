@@ -340,16 +340,25 @@ pub struct Subtask {
     pub completed: bool,
 }
 
-/// A goal — a high-level objective composed of tasks
+/// A goal — a high-level objective decomposed into subgoals (Hermes-style).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
     pub id: String,
     pub title: String,
     pub description: String,
     pub status: GoalStatus,
-    pub milestones: Vec<Milestone>,
+    pub subgoals: Vec<Subgoal>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub target_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Goal {
+    /// (completed, total) subgoals — the progress rollup for this goal.
+    pub fn progress(&self) -> (usize, usize) {
+        let total = self.subgoals.len();
+        let completed = self.subgoals.iter().filter(|s| s.completed).count();
+        (completed, total)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -361,8 +370,9 @@ pub enum GoalStatus {
     Abandoned,
 }
 
+/// A subgoal — an intermediate objective under a goal, decomposed into tasks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Milestone {
+pub struct Subgoal {
     pub id: String,
     pub title: String,
     pub description: String,
@@ -370,8 +380,9 @@ pub struct Milestone {
     pub tasks: Vec<String>, // Task IDs
 }
 
-/// Task board — manages goals, tasks, and milestones
-#[derive(Debug, Default)]
+/// Task board — manages goals, subgoals, and tasks. Serializable so it can be
+/// persisted (see `goal_store::GoalStore`).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TaskBoard {
     tasks: HashMap<String, Task>,
     goals: HashMap<String, Goal>,
@@ -500,7 +511,7 @@ impl TaskBoard {
             title: title.to_string(),
             description: description.to_string(),
             status: GoalStatus::Active,
-            milestones: Vec::new(),
+            subgoals: Vec::new(),
             created_at: chrono::Utc::now(),
             target_date: None,
         };
@@ -509,26 +520,26 @@ impl TaskBoard {
         id
     }
 
-    pub fn create_milestone(&mut self, goal_id: &str, title: &str) -> Option<String> {
+    pub fn create_subgoal(&mut self, goal_id: &str, title: &str, description: &str) -> Option<String> {
         if let Some(goal) = self.goals.get_mut(goal_id) {
-            let ms_id = uuid::Uuid::new_v4().to_string();
-            goal.milestones.push(Milestone {
-                id: ms_id.clone(),
+            let sg_id = uuid::Uuid::new_v4().to_string();
+            goal.subgoals.push(Subgoal {
+                id: sg_id.clone(),
                 title: title.to_string(),
-                description: String::new(),
+                description: description.to_string(),
                 completed: false,
                 tasks: Vec::new(),
             });
-            return Some(ms_id);
+            return Some(sg_id);
         }
         None
     }
 
-    pub fn complete_milestone(&mut self, goal_id: &str, milestone_id: &str) -> bool {
+    pub fn complete_subgoal(&mut self, goal_id: &str, subgoal_id: &str) -> bool {
         if let Some(goal) = self.goals.get_mut(goal_id) {
-            for ms in &mut goal.milestones {
-                if ms.id == milestone_id {
-                    ms.completed = true;
+            for sg in &mut goal.subgoals {
+                if sg.id == subgoal_id {
+                    sg.completed = true;
                     return true;
                 }
             }
@@ -536,13 +547,31 @@ impl TaskBoard {
         false
     }
 
-    pub fn goal_progress(&self, goal_id: &str) -> (usize, usize) {
-        if let Some(goal) = self.goals.get(goal_id) {
-            let total = goal.milestones.len();
-            let completed = goal.milestones.iter().filter(|m| m.completed).count();
-            return (completed, total);
+    /// Create a task and attach it to a subgoal. Returns the new task id, or
+    /// `None` if the goal/subgoal does not exist (no orphan task is created).
+    pub fn add_task_to_subgoal(&mut self, goal_id: &str, subgoal_id: &str, title: &str) -> Option<String> {
+        let exists = self
+            .goals
+            .get(goal_id)
+            .map_or(false, |g| g.subgoals.iter().any(|s| s.id == subgoal_id));
+        if !exists {
+            return None;
         }
-        (0, 0)
+        let task_id = self.create_task(title, "");
+        if let Some(goal) = self.goals.get_mut(goal_id) {
+            if let Some(sg) = goal.subgoals.iter_mut().find(|s| s.id == subgoal_id) {
+                sg.tasks.push(task_id.clone());
+            }
+        }
+        Some(task_id)
+    }
+
+    pub fn goal_progress(&self, goal_id: &str) -> (usize, usize) {
+        self.goals.get(goal_id).map(|g| g.progress()).unwrap_or((0, 0))
+    }
+
+    pub fn get_goal(&self, goal_id: &str) -> Option<&Goal> {
+        self.goals.get(goal_id)
     }
 
     pub fn list_goals(&self) -> Vec<&Goal> {
@@ -592,8 +621,8 @@ impl TaskBoard {
                     GoalStatus::Completed => "🎉",
                     GoalStatus::Abandoned => "🚫",
                 };
-                let (ms_done, ms_total) = self.goal_progress(&goal.id);
-                output.push_str(&format!("  {} {} ({}/{} milestones)\n", status_icon, &goal.title, ms_done, ms_total));
+                let (sg_done, sg_total) = self.goal_progress(&goal.id);
+                output.push_str(&format!("  {} {} ({}/{} subgoals)\n", status_icon, &goal.title, sg_done, sg_total));
             }
         }
 

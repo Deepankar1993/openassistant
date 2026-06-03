@@ -13,10 +13,16 @@ pub async fn start_gateway() -> Result<()> {
 
     let config = crate::config::load().await?;
 
-    // Start Discord if configured
+    // Start Discord if configured. Spawned (not awaited) so it runs alongside
+    // WebChat; a failure on that task is logged rather than silently lost.
     if !config.gateway.discord_token.is_empty() {
         info!("Discord token configured, starting Discord handler...");
-        // discord::start(&config.gateway.discord_token).await?;
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = discord::start(cfg).await {
+                tracing::error!("Discord gateway error: {}", e);
+            }
+        });
     }
 
     // Start Telegram if configured
