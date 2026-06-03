@@ -6,6 +6,7 @@
 //! `add-desktop-onboarding-options`, task 1.8).
 
 pub mod chat;
+pub mod gateway;
 pub mod memory;
 pub mod onboarding;
 pub mod persona;

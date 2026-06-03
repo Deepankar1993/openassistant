@@ -52,6 +52,7 @@
       app_version: "0.1.0",
     },
     history: [],
+    gatewayRunning: false,
     memoryMd: "# Long-term Memory\n\nNothing yet. Chat with your assistant to build up memory.",
     todayNote: "# Today\n\n*(no notes yet)*",
     memoryFiles: [
@@ -230,6 +231,14 @@
           { name: "How to run", ok: true, required: false, detail: "Start with `openassistant gateway` (or `cargo run -- gateway` if not on PATH)." },
         ];
       }
+      case "gateway_status":
+        return { running: !!mockState.gatewayRunning, address: mockState.gatewayRunning ? "http://0.0.0.0:3000" : null };
+      case "gateway_start":
+        mockState.gatewayRunning = true;
+        return "http://0.0.0.0:3000";
+      case "gateway_stop":
+        mockState.gatewayRunning = false;
+        return null;
       case "list_agents":
         return mockState.agents.slice();
       case "get_persona":
@@ -788,6 +797,7 @@
     } catch (_) {
       container.innerHTML = '<div class="hint" style="color:var(--danger)">Could not load readiness.</div>';
     }
+    refreshGatewayRunStatus();
   }
   const gwCheckBtn = $("#gateway-check-btn");
   if (gwCheckBtn) gwCheckBtn.addEventListener("click", loadGatewayReadiness);
@@ -796,6 +806,49 @@
     const cmd = $("#gateway-run-cmd").value;
     try { await navigator.clipboard.writeText(cmd); showToast("Command copied"); }
     catch (_) { showToast("Copy failed", true); }
+  });
+
+  // Start/stop the in-process gateway
+  async function refreshGatewayRunStatus() {
+    const el = $("#gateway-run-status");
+    const startBtn = $("#gateway-start-btn");
+    const stopBtn = $("#gateway-stop-btn");
+    if (!el) return;
+    try {
+      const s = await backend("gateway_status", {});
+      if (s.running) {
+        el.textContent = "● Running" + (s.address ? " · " + s.address : "");
+        el.style.color = "var(--success, #10b981)";
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = false;
+      } else {
+        el.textContent = "○ Stopped";
+        el.style.color = "var(--text-muted)";
+        if (startBtn) startBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = true;
+      }
+    } catch (_) {
+      el.textContent = "—";
+    }
+  }
+  const gwStartBtn = $("#gateway-start-btn");
+  if (gwStartBtn) gwStartBtn.addEventListener("click", async () => {
+    gwStartBtn.disabled = true;
+    const el = $("#gateway-run-status");
+    if (el) el.textContent = "Starting…";
+    try {
+      const url = await backend("gateway_start", {});
+      showToast("Gateway started" + (url ? " on " + url : ""));
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to start gateway", true);
+    }
+    refreshGatewayRunStatus();
+  });
+  const gwStopBtn = $("#gateway-stop-btn");
+  if (gwStopBtn) gwStopBtn.addEventListener("click", async () => {
+    try { await backend("gateway_stop", {}); showToast("Gateway stopped"); }
+    catch (_) { showToast("Failed to stop gateway", true); }
+    refreshGatewayRunStatus();
   });
 
   // Advanced section form

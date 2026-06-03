@@ -103,6 +103,10 @@ pub fn run() {
             commands::system::gateway_readiness,
             commands::system::open_external_url,
             commands::system::list_agents,
+            // gateway control
+            commands::gateway::gateway_start,
+            commands::gateway::gateway_stop,
+            commands::gateway::gateway_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
