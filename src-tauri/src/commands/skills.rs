@@ -58,8 +58,16 @@ pub async fn create_skill(name: String, content: String) -> Result<(), String> {
     if name.is_empty() {
         return Err("Skill name cannot be empty.".into());
     }
-    if name.contains(['/', '\\', '.']) {
-        return Err("Skill name must not contain path separators or dots.".into());
+    if name.contains(['/', '\\', '.']) || name.contains('\0') {
+        return Err("Skill name must not contain path separators, dots, or NUL.".into());
+    }
+    // Windows treats these as device files regardless of extension.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.iter().any(|r| name.eq_ignore_ascii_case(r)) {
+        return Err("Skill name conflicts with a reserved device name.".into());
     }
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     let dir = cfg

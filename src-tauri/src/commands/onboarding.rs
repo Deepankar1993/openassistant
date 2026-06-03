@@ -2,6 +2,7 @@
 
 use crate::state::AppCore;
 use open_assistant::config;
+use open_assistant::core::agent::Agent;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::State;
@@ -195,7 +196,13 @@ pub async fn save_onboarding_config(
     }
 
     config::save(&cfg).await.map_err(|e| e.to_string())?;
-    turn.agent.tools_enabled = cfg.tools.enabled;
+
+    // Onboarding always changes model / data_dir / tools, so rebuild the live
+    // agent. Without this the first message after setup would use the
+    // empty-config defaults captured by build_core() at startup.
+    turn.agent = Agent::new(cfg.model.model.clone())
+        .with_workspace(cfg.general.data_dir.clone())
+        .with_tools_enabled(cfg.tools.enabled);
     Ok(())
 }
 

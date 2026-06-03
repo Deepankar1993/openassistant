@@ -23,7 +23,14 @@ cargo tauri dev             # run the desktop app (from repo root; --no-watch to
 cargo tauri build           # produce a bundled installer
 ```
 
-First run routes to **Settings** until an API key is set (the default key ships empty). Tool execution (shell/file access) is **off by default** in the desktop app and gated behind an opt-in toggle.
+First run routes to a **4-screen onboarding wizard** (Workspace → AI Provider → Permissions → Finish) until an API key is set (the default key ships empty); it is re-enterable from Settings. Tool execution (shell/file access) is **off by default**, persisted in a `[tools]` config section, and gated behind an opt-in toggle.
+
+**Desktop internals to know:**
+- Commands live in `src-tauri/src/commands/` (one module per domain: `chat`, `settings`, `onboarding`, `memory`, `skills`, `system`), registered through a **single** `tauri::generate_handler!` in `lib.rs` (Tauri keeps only the last `invoke_handler` — never call it twice).
+- Plugins in use: `tauri-plugin-dialog` (folder picker) and `tauri-plugin-opener` (external provider-doc links, scoped to openrouter.ai/openai.com in `capabilities/default.json`). `probe_connection` calls the LLM via `reqwest` from Rust (no http plugin/capability needed).
+- All config writes use load→mutate→`config::save()`, never `config::set()` (whose allowlist silently drops most keys).
+- `lib.rs` carries a **CAPABILITY HONESTY TABLE**: stub core features (sub-agent/workflow execution, checkpoint restore, plugin marketplace, self-update, skill activation, live gateway) MUST NOT get a working UI affordance. The desktop surfaces only verified-real features: Chat, full Settings, Memory browser, Skills manager, Status/Doctor diagnostics; `list_agents` is read-only.
+- Frontend (`frontend/app.js`) talks to Tauri via `invoke` with **snake_case** arg keys matching the Rust params, and falls back to an in-app `defaultMock` (and a Playwright `installMock`) when run in a plain browser.
 
 ### Tests
 Tests now exist (run a single one with `cargo test <name>`):

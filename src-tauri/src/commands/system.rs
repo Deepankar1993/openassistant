@@ -86,6 +86,12 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResultDto>, String> {
 /// The frontend only ever passes URLs matching the opener capability allowlist.
 #[tauri::command]
 pub async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // Defense in depth: the opener capability scope only constrains the plugin's
+    // own JS API, not this custom command. A compromised webview could invoke us
+    // with file:// or javascript: — so validate the scheme in Rust too.
+    if !url.starts_with("https://") {
+        return Err("Only https:// URLs may be opened.".into());
+    }
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
