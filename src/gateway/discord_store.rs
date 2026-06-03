@@ -34,9 +34,36 @@ impl DiscordStore {
                  conv_id      TEXT PRIMARY KEY,
                  session_json TEXT NOT NULL,
                  updated_at   TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS claude_sessions (
+                 conv_id    TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
              );",
         )?;
         Ok(Self { conn })
+    }
+
+    /// The Claude Code session id bound to a conversation (for `--resume`).
+    pub fn get_claude_session(&self, conv_id: u64) -> Result<Option<String>> {
+        let res = self.conn.query_row(
+            "SELECT session_id FROM claude_sessions WHERE conv_id = ?1",
+            params![conv_id.to_string()],
+            |r| r.get::<_, String>(0),
+        );
+        match res {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_claude_session(&self, conv_id: u64, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO claude_sessions (conv_id, session_id, updated_at) VALUES (?1, ?2, ?3)",
+            params![conv_id.to_string(), session_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 
     /// All bot-owned thread ids (continue these without a mention).
@@ -84,6 +111,7 @@ impl DiscordStore {
 
     pub fn clear_conversation(&self, conv_id: u64) -> Result<()> {
         self.conn.execute("DELETE FROM conversations WHERE conv_id = ?1", params![conv_id.to_string()])?;
+        self.conn.execute("DELETE FROM claude_sessions WHERE conv_id = ?1", params![conv_id.to_string()])?;
         Ok(())
     }
 }

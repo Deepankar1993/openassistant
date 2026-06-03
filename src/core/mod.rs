@@ -1,5 +1,6 @@
 // src/core/mod.rs
 pub mod agent;
+pub mod claude_bridge;
 pub mod session;
 pub mod context;
 pub mod persona;
