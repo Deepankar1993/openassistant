@@ -114,6 +114,10 @@ pub struct GatewayConfig {
     pub telegram_token: String,
     pub slack_token: String,
     pub slack_signing_secret: String,
+    /// Bind address for the WebChat/Slack server. Empty ⇒ "0.0.0.0".
+    /// `#[serde(default)]` keeps configs written before this field existed loadable.
+    #[serde(default)]
+    pub webhook_host: String,
     pub webhook_port: u16,
     pub dm_policy: String, // "pairing" or "open"
 }
@@ -224,6 +228,12 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
                 .collect()
         }
         "gateway.dm_policy" => config.gateway.dm_policy = value.to_string(),
+        "gateway.webhook_host" => config.gateway.webhook_host = value.to_string(),
+        "gateway.webhook_port" => {
+            config.gateway.webhook_port = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid port '{}' (expected 0-65535)", value))?
+        }
         "gateway.telegram_token" => config.gateway.telegram_token = value.to_string(),
         "gateway.slack_token" => config.gateway.slack_token = value.to_string(),
         "security.dm_pairing" => config.security.dm_pairing = value.parse().unwrap_or(true),
@@ -264,6 +274,17 @@ pub fn resolve_provider<'a>(config: &'a Config, modality: &str) -> (&'a str, &'a
         }
     }
     (&config.model.api_base, &config.model.api_key, &config.model.model)
+}
+
+/// Resolve the WebChat/Slack bind host. Empty config ⇒ `0.0.0.0`.
+pub fn webchat_host(config: &Config) -> String {
+    let h = config.gateway.webhook_host.trim();
+    if h.is_empty() { "0.0.0.0".to_string() } else { h.to_string() }
+}
+
+/// Resolve the WebChat/Slack port. `0` (unset) ⇒ `3000`.
+pub fn webchat_port(config: &Config) -> u16 {
+    if config.gateway.webhook_port == 0 { 3000 } else { config.gateway.webhook_port }
 }
 
 fn config_path() -> PathBuf {

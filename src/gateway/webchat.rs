@@ -102,12 +102,13 @@ pub fn build_state(config: Config) -> GatewayState {
 }
 
 pub async fn start(config: Config) -> Result<()> {
-    // webhook_port defaults to 0 (unset) in config; fall back to 3000.
-    let port = if config.gateway.webhook_port == 0 { 3000 } else { config.gateway.webhook_port };
+    // Host/port resolve through the shared helpers (empty host ⇒ 0.0.0.0, port 0 ⇒ 3000).
+    let host = crate::config::webchat_host(&config);
+    let port = crate::config::webchat_port(&config);
     let state = build_state(config);
     let app = build_router(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("{}:{}", host, port);
     info!("WebChat (real agent loop) listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

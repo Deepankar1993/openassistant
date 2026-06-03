@@ -5,7 +5,122 @@ pub mod slack;
 pub mod webchat;
 
 use anyhow::Result;
+use serde::Serialize;
 use tracing::info;
+
+use crate::config::Config;
+
+/// One gateway setup requirement, surfaced identically in the CLI
+/// (`openassistant gateway --check`) and the desktop Channels panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayRequirement {
+    /// Short label, e.g. "API key" or "Discord".
+    pub name: String,
+    /// Whether this item is satisfied / ready.
+    pub ok: bool,
+    /// Required for any channel to function (vs. an optional channel).
+    pub required: bool,
+    /// Human-readable status plus an actionable hint.
+    pub detail: String,
+}
+
+fn req(name: &str, ok: bool, required: bool, detail: impl Into<String>) -> GatewayRequirement {
+    GatewayRequirement { name: name.into(), ok, required, detail: detail.into() }
+}
+
+/// Build the gateway readiness report from config. Pure (no I/O) so both the
+/// CLI and the desktop can call it.
+pub fn readiness(config: &Config) -> Vec<GatewayRequirement> {
+    let mut out = Vec::new();
+    let g = &config.gateway;
+
+    // Required: an LLM key, or no channel can actually answer.
+    let key_set = !config.model.api_key.trim().is_empty();
+    out.push(req(
+        "API key",
+        key_set,
+        true,
+        if key_set {
+            format!("Model API key is set (provider: {}).", config.model.provider)
+        } else {
+            "No API key — set it in the desktop Settings → Model, or run \
+             `openassistant config --key model.api_key --value <KEY>`."
+                .to_string()
+        },
+    ));
+
+    // WebChat is always available once the server runs.
+    let host = crate::config::webchat_host(config);
+    let port = crate::config::webchat_port(config);
+    out.push(req(
+        "WebChat server",
+        true,
+        false,
+        format!("Will listen on http://{host}:{port} (set gateway.webhook_host / gateway.webhook_port to change)."),
+    ));
+
+    // Discord.
+    let discord_set = !g.discord_token.trim().is_empty();
+    let gate_open = !g.discord_allowed_users.is_empty() || g.dm_policy == "open";
+    out.push(if !discord_set {
+        req("Discord", false, false, "Not configured (optional). Set gateway.discord_token to enable.")
+    } else if !gate_open {
+        req("Discord", false, false,
+            "Token set, but no allowlist and dm_policy isn't 'open' — the bot will ignore everyone. \
+             Set gateway.discord_allowed_users (your numeric user ID) or gateway.dm_policy=open.")
+    } else {
+        req("Discord", true, false,
+            "Ready. Reminder: enable the MESSAGE CONTENT intent in the Discord Developer Portal.")
+    });
+
+    // Telegram.
+    let telegram_set = !g.telegram_token.trim().is_empty();
+    out.push(if telegram_set {
+        req("Telegram", true, false, "Ready (Bot API long polling).")
+    } else {
+        req("Telegram", false, false, "Not configured (optional). Set gateway.telegram_token to enable.")
+    });
+
+    // Slack.
+    let slack_token = !g.slack_token.trim().is_empty();
+    let slack_secret = !g.slack_signing_secret.trim().is_empty();
+    out.push(if slack_token && slack_secret {
+        req("Slack", true, false,
+            format!("Ready. Point your Slack app's Events URL at http://<public-host>:{port}/slack/events (needs a public URL)."))
+    } else if slack_token || slack_secret {
+        req("Slack", false, false, "Partially configured — needs BOTH gateway.slack_token and gateway.slack_signing_secret.")
+    } else {
+        req("Slack", false, false, "Not configured (optional).")
+    });
+
+    // How to run — surfaced on both CLI and desktop, including the PATH fallback.
+    out.push(req(
+        "How to run",
+        true,
+        false,
+        "Start the gateway with `openassistant gateway`. If `openassistant` isn't on your PATH, \
+         run `cargo run -- gateway` from the project, or the built binary at \
+         `target/release/openassistant` (or `target/debug/openassistant`).",
+    ));
+
+    out
+}
+
+/// Format a readiness report for terminal output.
+pub fn format_readiness(reqs: &[GatewayRequirement]) -> String {
+    let mut s = String::from("Gateway readiness\n─────────────────\n");
+    for r in reqs {
+        let icon = if r.ok { "✅" } else if r.required { "❌" } else { "⚠️ " };
+        s.push_str(&format!("{icon} {}: {}\n", r.name, r.detail));
+    }
+    let unmet: Vec<&str> = reqs.iter().filter(|r| r.required && !r.ok).map(|r| r.name.as_str()).collect();
+    if unmet.is_empty() {
+        s.push_str("\nAll required items satisfied — the gateway can run.\n");
+    } else {
+        s.push_str(&format!("\nMissing required: {}.\n", unmet.join(", ")));
+    }
+    s
+}
 
 pub async fn start_gateway() -> Result<()> {
     info!("Starting openAssistant gateway...");

@@ -42,6 +42,10 @@
       telegram_token_set: false,
       slack_token_masked: "",
       slack_token_set: false,
+      webhook_host: "0.0.0.0",
+      webhook_port: 3000,
+      discord_allowed_users: [],
+      dm_policy: "pairing",
       dm_pairing: false,
       vision_provider: "gemini_cli",
       vision_gemini_path: "gemini",
@@ -129,6 +133,10 @@
           dm_pairing: typeof d.dm_pairing === "boolean" ? d.dm_pairing : mockState.config.dm_pairing,
           vision_provider: d.vision_provider || mockState.config.vision_provider,
           vision_gemini_path: d.vision_gemini_path || mockState.config.vision_gemini_path,
+          webhook_host: d.webhook_host !== undefined ? d.webhook_host : mockState.config.webhook_host,
+          webhook_port: d.webhook_port !== undefined ? d.webhook_port : mockState.config.webhook_port,
+          discord_allowed_users: Array.isArray(d.discord_allowed_users) ? d.discord_allowed_users : mockState.config.discord_allowed_users,
+          dm_policy: d.dm_policy || mockState.config.dm_policy,
         });
         if (d.api_key) { mockState.config.api_key_set = true; mockState.config.api_key_masked = "••••" + String(d.api_key).slice(-4); }
         if (d.discord_token) { mockState.config.discord_token_set = true; mockState.config.discord_token_masked = "••••" + String(d.discord_token).slice(-4); }
@@ -208,6 +216,20 @@
           { name: "Gateway", ok: false, message: "No gateway tokens configured", is_optional: true },
           { name: "Vision (Gemini CLI)", ok: false, message: "Not found — image analysis unavailable", is_optional: true },
         ];
+      case "gateway_readiness": {
+        const c = mockState.config;
+        const host = c.webhook_host || "0.0.0.0";
+        const port = c.webhook_port || 3000;
+        const gateOpen = (c.discord_allowed_users && c.discord_allowed_users.length) || c.dm_policy === "open";
+        return [
+          { name: "API key", ok: !!c.api_key_set, required: true, detail: c.api_key_set ? "Model API key is set." : "No API key — set it in Settings → Model." },
+          { name: "WebChat server", ok: true, required: false, detail: `Will listen on http://${host}:${port}.` },
+          { name: "Discord", ok: !!c.discord_token_set && gateOpen, required: false, detail: !c.discord_token_set ? "Not configured (optional)." : (gateOpen ? "Ready. Enable MESSAGE CONTENT intent in the Developer Portal." : "Token set but no allowlist and dm_policy isn't 'open' — bot ignores everyone.") },
+          { name: "Telegram", ok: !!c.telegram_token_set, required: false, detail: c.telegram_token_set ? "Ready." : "Not configured (optional)." },
+          { name: "Slack", ok: false, required: false, detail: "Needs slack_token + signing secret + a public URL." },
+          { name: "How to run", ok: true, required: false, detail: "Start with `openassistant gateway` (or `cargo run -- gateway` if not on PATH)." },
+        ];
+      }
       case "list_agents":
         return mockState.agents.slice();
       case "get_persona":
@@ -514,6 +536,14 @@
       if (slackEl) { slackEl.value = ""; $("#slack-token-hint").textContent = c.slack_token_set ? `Set (${c.slack_token_masked}). Leave blank to keep.` : "Not set."; }
       const pairingEl = $("#cfg-dm-pairing");
       if (pairingEl) pairingEl.checked = !!c.dm_pairing;
+      const hostEl = $("#cfg-webhook-host");
+      if (hostEl) hostEl.value = c.webhook_host || "";
+      const portEl = $("#cfg-webhook-port");
+      if (portEl) portEl.value = (c.webhook_port !== undefined && c.webhook_port !== 0) ? c.webhook_port : "";
+      const allowedEl = $("#cfg-discord-allowed");
+      if (allowedEl) allowedEl.value = Array.isArray(c.discord_allowed_users) ? c.discord_allowed_users.join(", ") : "";
+      const dmPolicyEl = $("#cfg-dm-policy");
+      if (dmPolicyEl) dmPolicyEl.value = c.dm_policy || "pairing";
       // Advanced
       const visionEl = $("#cfg-vision-provider");
       if (visionEl) visionEl.value = c.vision_provider || "gemini_cli";
@@ -521,6 +551,7 @@
       if (geminiEl) geminiEl.value = c.vision_gemini_path || "gemini";
       const appVerEl = $("#settings-app-version");
       if (appVerEl) appVerEl.textContent = c.app_version || "—";
+      loadGatewayReadiness();
     } catch (err) { showToast("Failed to load settings", true); }
   }
 
@@ -542,6 +573,10 @@
       discord_token: null,
       telegram_token: null,
       slack_token: null,
+      webhook_host: c.webhook_host || "",
+      webhook_port: c.webhook_port || 0,
+      discord_allowed_users: Array.isArray(c.discord_allowed_users) ? c.discord_allowed_users : [],
+      dm_policy: c.dm_policy || "pairing",
       dm_pairing: c.dm_pairing,
       vision_provider: c.vision_provider,
       vision_gemini_path: c.vision_gemini_path,
@@ -700,21 +735,67 @@
     const discordVal = $("#cfg-discord-token").value.trim();
     const telegramVal = $("#cfg-telegram-token").value.trim();
     const slackVal = $("#cfg-slack-token").value.trim();
+    const allowed = ($("#cfg-discord-allowed").value || "")
+      .split(",").map(s => s.trim()).filter(Boolean);
     try {
       await saveFullConfigWith({
         discord_token: discordVal || null,
         telegram_token: telegramVal || null,
         slack_token: slackVal || null,
+        webhook_host: $("#cfg-webhook-host").value.trim(),
+        webhook_port: parseInt($("#cfg-webhook-port").value, 10) || 0,
+        discord_allowed_users: allowed,
+        dm_policy: $("#cfg-dm-policy").value,
         dm_pairing: $("#cfg-dm-pairing").checked,
       });
       status.textContent = "Saved ✓";
       showToast("Channel settings saved");
       await loadConfig();
+      loadGatewayReadiness();
     } catch (err) {
       status.className = "save-status err";
       status.textContent = "Save failed";
       showToast(typeof err === "string" ? err : "Save failed", true);
     }
+  });
+
+  // Gateway readiness panel (Channels section)
+  async function loadGatewayReadiness() {
+    const container = $("#gateway-readiness");
+    if (!container) return;
+    try {
+      const rows = await backend("gateway_readiness", {});
+      container.innerHTML = "";
+      rows.forEach(r => {
+        const cls = r.ok ? "ok" : r.required ? "fail" : "warn";
+        const icon = r.ok ? "✅" : r.required ? "❌" : "⚠️";
+        const row = document.createElement("div");
+        row.className = "doctor-row " + cls;
+        const iconEl = document.createElement("span");
+        iconEl.className = "doctor-icon";
+        iconEl.textContent = icon;
+        const nameEl = document.createElement("span");
+        nameEl.className = "doctor-name";
+        nameEl.textContent = r.name;
+        const msgEl = document.createElement("span");
+        msgEl.className = "doctor-msg";
+        msgEl.textContent = r.detail;
+        row.appendChild(iconEl);
+        row.appendChild(nameEl);
+        row.appendChild(msgEl);
+        container.appendChild(row);
+      });
+    } catch (_) {
+      container.innerHTML = '<div class="hint" style="color:var(--danger)">Could not load readiness.</div>';
+    }
+  }
+  const gwCheckBtn = $("#gateway-check-btn");
+  if (gwCheckBtn) gwCheckBtn.addEventListener("click", loadGatewayReadiness);
+  const gwCopyBtn = $("#gateway-copy-cmd");
+  if (gwCopyBtn) gwCopyBtn.addEventListener("click", async () => {
+    const cmd = $("#gateway-run-cmd").value;
+    try { await navigator.clipboard.writeText(cmd); showToast("Command copied"); }
+    catch (_) { showToast("Copy failed", true); }
   });
 
   // Advanced section form

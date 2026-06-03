@@ -82,6 +82,25 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResultDto>, String> {
     Ok(out)
 }
 
+#[derive(Debug, Serialize)]
+pub struct GatewayRequirementDto {
+    pub name: String,
+    pub ok: bool,
+    pub required: bool,
+    pub detail: String,
+}
+
+/// Gateway setup readiness, surfaced in the Settings → Channels panel. Mirrors
+/// the CLI's `openassistant gateway --check` output (shared core function).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn gateway_readiness() -> Result<Vec<GatewayRequirementDto>, String> {
+    let cfg = config::load().await.map_err(|e| e.to_string())?;
+    Ok(open_assistant::gateway::readiness(&cfg)
+        .into_iter()
+        .map(|r| GatewayRequirementDto { name: r.name, ok: r.ok, required: r.required, detail: r.detail })
+        .collect())
+}
+
 /// Open a provider-documentation URL in the OS browser (not the webview).
 /// The frontend only ever passes URLs matching the opener capability allowlist.
 #[tauri::command(rename_all = "snake_case")]

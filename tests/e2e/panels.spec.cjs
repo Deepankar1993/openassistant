@@ -443,7 +443,7 @@ test.describe("Expanded Settings", () => {
     await expect(page.getByTestId("settings-memory-max")).toBeVisible();
   });
 
-  test("clicking Channels section nav shows the experimental callout", async ({
+  test("clicking Channels section shows gateway config and a readiness check", async ({
     page,
   }) => {
     await installMock(page, { apiKeySet: true, initialView: "chat" });
@@ -456,8 +456,18 @@ test.describe("Expanded Settings", () => {
     await expect(page.getByTestId("settings-channels")).not.toHaveClass(
       /hidden/
     );
-    await expect(page.locator("#settings-section-channels")).toContainText(
+    // The stale "experimental" callout is gone; real gateway config is present.
+    await expect(page.locator("#settings-section-channels")).not.toContainText(
       /experimental/i
+    );
+    await expect(page.getByTestId("settings-webhook-host")).toBeVisible();
+    await expect(page.getByTestId("settings-webhook-port")).toBeVisible();
+    await expect(page.getByTestId("settings-dm-policy")).toBeVisible();
+
+    // The readiness panel populates on demand.
+    await page.getByTestId("gateway-check").click();
+    await expect(page.getByTestId("gateway-readiness")).toContainText(
+      /WebChat server/i
     );
   });
 

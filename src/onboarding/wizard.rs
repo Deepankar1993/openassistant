@@ -93,6 +93,7 @@ pub async fn run_wizard() -> Result<()> {
             telegram_token: telegram_token.clone(),
             slack_token: String::new(),
             slack_signing_secret: String::new(),
+            webhook_host: String::new(),
             webhook_port: 3000,
             dm_policy: if dm_pairing { "pairing".to_string() } else { "open".to_string() },
         },

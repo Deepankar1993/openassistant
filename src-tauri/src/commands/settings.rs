@@ -38,6 +38,11 @@ pub struct ConfigDto {
     pub telegram_token_set: bool,
     pub slack_token_masked: String,
     pub slack_token_set: bool,
+    // Gateway server + Discord access
+    pub webhook_host: String,
+    pub webhook_port: u16,
+    pub discord_allowed_users: Vec<String>,
+    pub dm_policy: String,
     // Security
     pub dm_pairing: bool,
     // Vision
@@ -66,6 +71,14 @@ pub struct FullConfigDto {
     pub discord_token: Option<String>,
     pub telegram_token: Option<String>,
     pub slack_token: Option<String>,
+    #[serde(default)]
+    pub webhook_host: String,
+    #[serde(default)]
+    pub webhook_port: u16,
+    #[serde(default)]
+    pub discord_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub dm_policy: String,
     pub dm_pairing: bool,
     pub vision_provider: String,
     pub vision_gemini_path: String,
@@ -105,6 +118,10 @@ pub async fn get_config() -> Result<ConfigDto, String> {
         telegram_token_set: !cfg.gateway.telegram_token.trim().is_empty(),
         slack_token_masked: mask_key(&cfg.gateway.slack_token),
         slack_token_set: !cfg.gateway.slack_token.trim().is_empty(),
+        webhook_host: cfg.gateway.webhook_host,
+        webhook_port: cfg.gateway.webhook_port,
+        discord_allowed_users: cfg.gateway.discord_allowed_users,
+        dm_policy: cfg.gateway.dm_policy,
         dm_pairing: cfg.security.dm_pairing,
         vision_provider: cfg.vision.provider,
         vision_gemini_path: cfg.vision.gemini_path,
@@ -156,6 +173,16 @@ pub async fn save_full_config(state: State<'_, AppCore>, dto: FullConfigDto) -> 
     set_if_present(&mut cfg.gateway.discord_token, dto.discord_token);
     set_if_present(&mut cfg.gateway.telegram_token, dto.telegram_token);
     set_if_present(&mut cfg.gateway.slack_token, dto.slack_token);
+
+    cfg.gateway.webhook_host = dto.webhook_host.trim().to_string();
+    cfg.gateway.webhook_port = dto.webhook_port;
+    cfg.gateway.discord_allowed_users = dto
+        .discord_allowed_users
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    cfg.gateway.dm_policy = dto.dm_policy.trim().to_string();
 
     cfg.security.dm_pairing = dto.dm_pairing;
     cfg.vision.provider = dto.vision_provider.trim().to_string();
