@@ -32,6 +32,27 @@ The user runs **Claude Code** (`claude`) locally and wants to drive it *through*
 
 **Verified:** unit tests (arg building, JSON parse, resume, skip-permissions); **real end-to-end** (`openassistant claude` returned a live Claude reply, captured the session id + cost, and `--resume` recalled the prior turn); gateway started with **Claude bridge ON** and **Discord connected**.
 
+## Security model
+
+A background security review flagged that letting remote callers reach
+`--dangerously-skip-permissions` is an escalation path. Mitigations:
+
+- **Origin-aware permissions.** `BridgeOrigin::{Operator, Remote}`. Only the
+  **local operator** (`openassistant claude` CLI) may use
+  `--dangerously-skip-permissions` or `permission_mode = bypassPermissions`.
+  **Remote** callers — Discord authors and the LLM `claude` tool — never get the
+  bypass; `bypassPermissions`/`skip_permissions` are downgraded to `acceptEdits`.
+  `from_config` defaults to `Remote` (safe by default); the CLI opts in via
+  `.operator()`.
+- **Auth gate.** The Discord allowlist (`gateway.discord_allowed_users`) is the
+  trust boundary; the bridge is unreachable by non-allowlisted users. Startup
+  **warns** if the bridge is enabled with `dm_policy=open` and no allowlist.
+- **Residual risk (documented).** Even capped at `acceptEdits`, an allowlisted
+  Discord user can make Claude edit files / run permitted commands in the
+  configured workspace. Treat the allowlist as you would shell access. Process
+  sandboxing (container/bwrap) and a command classifier are noted follow-ups;
+  for stricter setups set `claude.permission_mode = plan` (read-only).
+
 ## Non-Goals
 
 - **Routing WebChat through Claude** — Discord is the bridge target; WebChat/CLI stay on the configured LLM (the `claude` tool is available on demand).

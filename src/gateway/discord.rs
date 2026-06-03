@@ -370,7 +370,22 @@ pub async fn start(config: Config) -> Result<()> {
     let bridge = if config.claude.enabled && config.claude.discord_default {
         let persona = Persona::load_or_default(&config.general.data_dir);
         let human = build_human_prompt(&persona, &config.claude.append_system_prompt);
+        // Discord is a REMOTE origin (not the local operator): the bridge caps
+        // it to a non-bypass permission mode and never honors skip_permissions,
+        // so an allowlisted chat author can't escalate to full autonomy.
         let b = ClaudeBridge::from_config(&config.claude, &config.general.data_dir).with_system_prompt(human);
+        if config.gateway.dm_policy == "open" && config.gateway.discord_allowed_users.is_empty() {
+            warn!(
+                "SECURITY: Claude bridge is ON with dm_policy=open and no allowlist — anyone who \
+                 can DM the bot can drive Claude Code on this machine. Set gateway.discord_allowed_users."
+            );
+        }
+        if config.claude.skip_permissions {
+            warn!(
+                "Note: claude.skip_permissions applies only to the local `openassistant claude` CLI; \
+                 Discord-driven calls are capped to a non-bypass permission mode."
+            );
+        }
         if b.available().await {
             info!("Claude bridge ON — Discord conversations route through `claude` (cwd: {}).", b.workspace());
             Some(Arc::new(b))

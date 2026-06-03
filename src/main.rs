@@ -128,10 +128,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Claude { prompt, resume } => {
             let config = config::load().await?;
+            // Local operator (this CLI) is trusted with full autonomy
+            // (e.g. claude.skip_permissions). Remote callers never are.
             let bridge = open_assistant::core::claude_bridge::ClaudeBridge::from_config(
                 &config.claude,
                 &config.general.data_dir,
-            );
+            )
+            .operator();
             if !bridge.available().await {
                 println!("❌ `claude` binary not found. Set it with `config --key claude.bin --value <path>`.");
             } else {

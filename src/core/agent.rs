@@ -393,6 +393,8 @@ impl Agent {
         }
         let resume = args["resume"].as_str();
         let config = crate::config::load().await?;
+        // LLM tool-loop calls are REMOTE origin (no `.operator()`): the bridge
+        // refuses --dangerously-skip-permissions and caps the permission mode.
         let bridge = super::claude_bridge::ClaudeBridge::from_config(&config.claude, &self.workspace_dir);
         match bridge.run(prompt, resume).await {
             Ok(r) => Ok(r.text),
