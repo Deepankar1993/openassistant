@@ -22,6 +22,8 @@ pub struct Turn {
 /// Top-level managed state registered via `app.manage(...)`.
 pub struct AppCore {
     pub turn: Mutex<Turn>,
+    /// The in-process messaging gateway, when started from the desktop.
+    pub gateway: Mutex<Option<open_assistant::gateway::GatewayRunHandle>>,
 }
 
 impl AppCore {
@@ -34,6 +36,7 @@ impl AppCore {
                 ctx,
                 session: Session::new("desktop", "local"),
             }),
+            gateway: Mutex::new(None),
         }
     }
 }

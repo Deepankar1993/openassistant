@@ -388,6 +388,15 @@ async function installMock(page, opts = {}) {
               { name: "How to run", ok: true, required: false, detail: "Start with `openassistant gateway`." },
             ];
 
+          case "gateway_status":
+            return { running: !!mockState.gatewayRunning, address: mockState.gatewayRunning ? "http://0.0.0.0:3000" : null };
+          case "gateway_start":
+            mockState.gatewayRunning = true;
+            return "http://0.0.0.0:3000";
+          case "gateway_stop":
+            mockState.gatewayRunning = false;
+            return null;
+
           case "list_agents":
             return mockState.agents.slice();
           case "get_persona":

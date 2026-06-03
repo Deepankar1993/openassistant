@@ -122,14 +122,11 @@ pub fn format_readiness(reqs: &[GatewayRequirement]) -> String {
     s
 }
 
-pub async fn start_gateway() -> Result<()> {
-    info!("Starting openAssistant gateway...");
-    info!("Loading config...");
-
-    let config = crate::config::load().await?;
-
-    // Start Discord if configured. Spawned (not awaited) so it runs alongside
-    // WebChat; a failure on that task is logged rather than silently lost.
+/// Spawn the optional channels (Discord/Telegram) and run the WebChat server in
+/// the foreground (blocks until it stops). Shared by the CLI (`start_gateway`)
+/// and the desktop (`start_gateway_handle`).
+async fn run_all(config: Config) -> Result<()> {
+    // Discord/Telegram run on their own tasks; failures are logged, not lost.
     if !config.gateway.discord_token.is_empty() {
         info!("Discord token configured, starting Discord handler...");
         let cfg = config.clone();
@@ -139,8 +136,6 @@ pub async fn start_gateway() -> Result<()> {
             }
         });
     }
-
-    // Start Telegram if configured (long-poll loop on its own task).
     if !config.gateway.telegram_token.is_empty() {
         info!("Telegram token configured, starting Telegram handler...");
         let cfg = config.clone();
@@ -150,18 +145,71 @@ pub async fn start_gateway() -> Result<()> {
             }
         });
     }
-
-    // Slack is served by the WebChat axum server (POST /slack/events) when
-    // configured; it needs a publicly reachable URL.
     if !config.gateway.slack_token.is_empty() || !config.gateway.slack_signing_secret.is_empty() {
         info!("Slack configured — Events endpoint will be served at POST /slack/events (requires a public URL).");
     }
 
-    // WebChat is the blocking foreground server and also hosts the Slack route.
     info!("Starting WebChat messaging server (real agent loop)...");
-    webchat::start(config).await?;
+    webchat::start(config).await
+}
 
-    Ok(())
+/// Run the gateway in the foreground (CLI `openassistant gateway`).
+pub async fn start_gateway() -> Result<()> {
+    info!("Starting openAssistant gateway...");
+    let config = crate::config::load().await?;
+    run_all(config).await
+}
+
+/// A running gateway that can be polled or stopped — used by the desktop app to
+/// start/stop the server in-process.
+pub struct GatewayRunHandle {
+    /// The resolved bind address (host:port).
+    pub addr: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl GatewayRunHandle {
+    /// Abort the gateway task (stops the WebChat server + spawned channels).
+    pub fn stop(&self) {
+        self.task.abort();
+    }
+
+    /// Whether the gateway task is still alive.
+    pub fn is_running(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    /// Await the gateway task (used by foreground callers).
+    pub async fn wait(self) -> Result<()> {
+        let _ = self.task.await;
+        Ok(())
+    }
+}
+
+/// Start the gateway on a background task and return a handle. Binds the
+/// WebChat address up front so a port conflict surfaces immediately (as an
+/// error) rather than disappearing into the spawned task.
+pub async fn start_gateway_handle(config: Config) -> Result<GatewayRunHandle> {
+    let host = crate::config::webchat_host(&config);
+    let port = crate::config::webchat_port(&config);
+    let addr = format!("{host}:{port}");
+
+    // Probe the address so "port already in use" is reported to the caller.
+    // The probe is dropped before the server claims it (tiny TOCTOU window,
+    // acceptable for a local single-user app).
+    {
+        let _probe = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot bind {addr}: {e}"))?;
+    }
+
+    let task = tokio::spawn(async move {
+        if let Err(e) = run_all(config).await {
+            tracing::error!("Gateway stopped: {}", e);
+        }
+    });
+
+    Ok(GatewayRunHandle { addr, task })
 }
 
 pub async fn check() -> Result<()> {

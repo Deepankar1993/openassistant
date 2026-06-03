@@ -469,6 +469,13 @@ test.describe("Expanded Settings", () => {
     await expect(page.getByTestId("gateway-readiness")).toContainText(
       /WebChat server/i
     );
+
+    // The gateway can be started in-process and reports running status.
+    await expect(page.getByTestId("gateway-start")).toBeVisible();
+    await page.getByTestId("gateway-start").click();
+    await expect(page.getByTestId("gateway-run-status")).toContainText(/running/i);
+    await page.getByTestId("gateway-stop").click();
+    await expect(page.getByTestId("gateway-run-status")).toContainText(/stopped/i);
   });
 
   test("clicking Advanced section shows Re-run Setup Wizard button and app version", async ({
