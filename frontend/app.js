@@ -60,6 +60,16 @@
       { name: "daily-plan", description: "Help plan your day.", category: "productivity", is_builtin: true, content: "# daily-plan\n\nHelp create a prioritized plan for the day.\n" },
     ],
     agents: [],
+    persona: {
+      name: "openAssistant",
+      emoji: "🦞",
+      tone: "friendly",
+      language: "English",
+      personality: "You are a helpful, honest, and harmless AI assistant.",
+      principles: ["Be genuinely helpful, not performatively helpful", "Always be honest — never make things up"],
+      boundaries: ["Will not pretend to be human"],
+      capabilities: ["File reading and writing", "Memory search and management"],
+    },
   };
 
   async function defaultMock(cmd, args) {
@@ -200,6 +210,13 @@
         ];
       case "list_agents":
         return mockState.agents.slice();
+      case "get_persona":
+        return { ...mockState.persona };
+      case "save_persona": {
+        const d = args.dto || args;
+        Object.assign(mockState.persona, d);
+        return null;
+      }
 
       default:
         return null;
@@ -229,7 +246,7 @@
     views.forEach((v) => $("#view-" + v).classList.toggle("hidden", v !== name));
     $$(".nav-item").forEach((b) =>
       b.classList.toggle("active", b.dataset.view === name));
-    if (name === "settings") loadConfig();
+    if (name === "settings") { loadConfig(); loadPersona(); }
     if (name === "chat") refreshStatus();
     if (name === "memory") loadMemoryView();
     if (name === "skills") loadSkillsView();
@@ -570,6 +587,48 @@
       });
       status.textContent = "Saved ✓";
       showToast("General settings saved");
+    } catch (err) {
+      status.className = "save-status err";
+      status.textContent = "Save failed";
+      showToast(typeof err === "string" ? err : "Save failed", true);
+    }
+  });
+
+  // Persona section
+  async function loadPersona() {
+    try {
+      const p = await backend("get_persona", {});
+      if (!p) return;
+      $("#persona-name").value = p.name || "";
+      $("#persona-emoji").value = p.emoji || "";
+      $("#persona-tone").value = p.tone || "friendly";
+      $("#persona-language").value = p.language || "";
+      $("#persona-personality").value = p.personality || "";
+      $("#persona-principles").value = (p.principles || []).join("\n");
+      $("#persona-boundaries").value = (p.boundaries || []).join("\n");
+      $("#persona-capabilities").value = (p.capabilities || []).join("\n");
+    } catch (err) {
+      showToast("Failed to load persona", true);
+    }
+  }
+  const linesOf = (id) => $(id).value.split("\n").map((s) => s.trim()).filter(Boolean);
+  $("#settings-persona-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = $("#save-persona-status");
+    status.textContent = "Saving…"; status.className = "save-status";
+    try {
+      await backend("save_persona", { dto: {
+        name: $("#persona-name").value.trim() || "openAssistant",
+        emoji: $("#persona-emoji").value.trim(),
+        tone: $("#persona-tone").value,
+        language: $("#persona-language").value.trim() || "English",
+        personality: $("#persona-personality").value.trim(),
+        principles: linesOf("#persona-principles"),
+        boundaries: linesOf("#persona-boundaries"),
+        capabilities: linesOf("#persona-capabilities"),
+      } });
+      status.textContent = "Saved ✓";
+      showToast("Persona saved");
     } catch (err) {
       status.className = "save-status err";
       status.textContent = "Save failed";

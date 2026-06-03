@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod memory;
 pub mod onboarding;
+pub mod persona;
 pub mod settings;
 pub mod skills;
 pub mod system;

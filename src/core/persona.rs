@@ -22,6 +22,42 @@ pub struct Persona {
     pub preferences: serde_json::Value, // Agent preferences (verbosity, formatting, etc.)
 }
 
+impl Persona {
+    /// Path to the persisted persona ("SOUL") file under the data dir.
+    pub fn persona_path(data_dir: &str) -> PathBuf {
+        PathBuf::from(format!("{}/persona.json", data_dir))
+    }
+
+    /// Load the persisted persona, falling back to the default if absent/invalid.
+    pub fn load_or_default(data_dir: &str) -> Self {
+        let path = Self::persona_path(data_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(p) => {
+                    debug!("Loaded persona from {}", path.display());
+                    p
+                }
+                Err(e) => {
+                    info!("persona.json present but unreadable ({e}); using default");
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Persist the persona to `<data_dir>/persona.json`.
+    pub fn save(&self, data_dir: &str) -> anyhow::Result<()> {
+        let path = Self::persona_path(data_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        info!("Saved persona to {}", path.display());
+        Ok(())
+    }
+}
+
 impl Default for Persona {
     fn default() -> Self {
         Self {

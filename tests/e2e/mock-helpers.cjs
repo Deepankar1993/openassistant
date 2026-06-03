@@ -380,6 +380,15 @@ async function installMock(page, opts = {}) {
 
           case "list_agents":
             return mockState.agents.slice();
+          case "get_persona":
+            return {
+              name: "openAssistant", emoji: "🦞", tone: "friendly", language: "English",
+              personality: "You are a helpful, honest, and harmless AI assistant.",
+              principles: ["Always be honest"], boundaries: ["Will not pretend to be human"],
+              capabilities: ["Memory search and management"],
+            };
+          case "save_persona":
+            return null;
 
           default:
             return null;

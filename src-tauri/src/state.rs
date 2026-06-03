@@ -8,7 +8,7 @@
 //! tasks 2.1–2.2.
 
 use open_assistant::core::agent::Agent;
-use open_assistant::core::persona::FullContext;
+use open_assistant::core::persona::{FullContext, Persona};
 use open_assistant::core::session::Session;
 use tauri::async_runtime::Mutex;
 
@@ -25,11 +25,13 @@ pub struct AppCore {
 }
 
 impl AppCore {
-    pub fn new(agent: Agent) -> Self {
+    pub fn new(agent: Agent, persona: Persona) -> Self {
+        let mut ctx = FullContext::new();
+        ctx.persona = persona; // injected into every system prompt
         Self {
             turn: Mutex::new(Turn {
                 agent,
-                ctx: FullContext::new(),
+                ctx,
                 session: Session::new("desktop", "local"),
             }),
         }

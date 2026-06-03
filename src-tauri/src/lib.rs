@@ -33,10 +33,12 @@ use tauri::Manager;
 /// configured data dir, honoring the persisted tool-execution posture.
 fn build_core() -> AppCore {
     let cfg = tauri::async_runtime::block_on(open_assistant::config::load()).unwrap_or_default();
+    let data_dir = cfg.general.data_dir.clone();
+    let persona = open_assistant::core::persona::Persona::load_or_default(&data_dir);
     let agent = Agent::new(cfg.model.model)
-        .with_workspace(cfg.general.data_dir)
+        .with_workspace(data_dir)
         .with_tools_enabled(cfg.tools.enabled);
-    AppCore::new(agent)
+    AppCore::new(agent, persona)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -70,6 +72,9 @@ pub fn run() {
             commands::settings::save_config,
             commands::settings::save_full_config,
             commands::settings::set_tools_enabled,
+            // persona
+            commands::persona::get_persona,
+            commands::persona::save_persona,
             // onboarding
             commands::onboarding::get_app_state,
             commands::onboarding::probe_connection,

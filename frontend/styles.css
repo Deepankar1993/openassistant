@@ -191,6 +191,11 @@ body {
 .input-row { display: flex; gap: 8px; align-items: center; }
 .input-row input { flex: 1; }
 
+/* ── Persona section ──────────────────────────────── */
+.persona-row { display: flex; gap: 14px; }
+.section-hint { font-size: 13px; color: var(--text-muted); margin: -6px 0 6px; max-width: 620px; line-height: 1.5; }
+#persona-emoji { text-align: center; font-size: 16px; }
+
 /* ── Path chip ────────────────────────────────────── */
 .path-chip {
   display: inline-block; padding: 6px 12px; background: var(--bg-tertiary);

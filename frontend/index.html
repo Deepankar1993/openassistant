@@ -67,6 +67,7 @@
           <nav class="settings-nav" data-testid="settings-nav" aria-label="Settings categories">
             <button class="settings-nav-item active" data-section="model">Model</button>
             <button class="settings-nav-item" data-section="general">General</button>
+            <button class="settings-nav-item" data-section="persona" data-testid="settings-nav-persona">Persona</button>
             <button class="settings-nav-item" data-section="tools">Tools</button>
             <button class="settings-nav-item" data-section="memory">Memory</button>
             <button class="settings-nav-item" data-section="skills">Skills</button>
@@ -141,6 +142,59 @@
                 <div class="actions">
                   <button type="submit" class="btn primary" data-testid="settings-general-save">Save</button>
                   <span class="save-status" id="save-general-status"></span>
+                </div>
+              </form>
+            </div>
+
+            <!-- Persona section -->
+            <div class="settings-section hidden" id="settings-section-persona" data-testid="settings-persona">
+              <h2>Persona</h2>
+              <p class="section-hint">Your assistant's identity. This shapes how it speaks and behaves — it's injected into every prompt.</p>
+              <form class="form" id="settings-persona-form" autocomplete="off">
+                <div class="persona-row">
+                  <label class="field" style="flex:0 0 90px">
+                    <span>Emoji</span>
+                    <input type="text" id="persona-emoji" data-testid="persona-emoji" maxlength="4" placeholder="🦞" />
+                  </label>
+                  <label class="field" style="flex:1">
+                    <span>Name</span>
+                    <input type="text" id="persona-name" data-testid="persona-name" placeholder="openAssistant" maxlength="64" />
+                  </label>
+                </div>
+                <div class="persona-row">
+                  <label class="field" style="flex:1">
+                    <span>Tone</span>
+                    <select id="persona-tone" data-testid="persona-tone">
+                      <option value="friendly">friendly</option>
+                      <option value="professional">professional</option>
+                      <option value="casual">casual</option>
+                      <option value="technical">technical</option>
+                    </select>
+                  </label>
+                  <label class="field" style="flex:1">
+                    <span>Language</span>
+                    <input type="text" id="persona-language" data-testid="persona-language" placeholder="English" maxlength="32" />
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Personality</span>
+                  <textarea id="persona-personality" data-testid="persona-personality" rows="4" placeholder="Describe the assistant's personality…"></textarea>
+                </label>
+                <label class="field">
+                  <span>Principles <small class="hint">(one per line)</small></span>
+                  <textarea id="persona-principles" data-testid="persona-principles" rows="5" placeholder="Be genuinely helpful…"></textarea>
+                </label>
+                <label class="field">
+                  <span>Boundaries <small class="hint">(one per line — what it will NOT do)</small></span>
+                  <textarea id="persona-boundaries" data-testid="persona-boundaries" rows="4" placeholder="Will not…"></textarea>
+                </label>
+                <label class="field">
+                  <span>Capabilities <small class="hint">(one per line)</small></span>
+                  <textarea id="persona-capabilities" data-testid="persona-capabilities" rows="4" placeholder="Terminal access…"></textarea>
+                </label>
+                <div class="actions">
+                  <button type="submit" class="btn primary" data-testid="persona-save">Save persona</button>
+                  <span class="save-status" id="save-persona-status"></span>
                 </div>
               </form>
             </div>
