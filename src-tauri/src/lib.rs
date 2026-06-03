@@ -14,7 +14,6 @@
 //!   Plugin marketplace      | Marketplace source always Err(...)             | core/plugins.rs:216
 //!   Skill activation toggle | activate_skill() not read by Agent::process    | skills/engine.rs
 //!   plan/perm handlers      | return placeholder text                        | core/agent.rs
-//!   Telegram/Slack gateway  | still placeholders (Discord is now real)       | gateway/
 //!
 //! `list_agents` (read-only definitions) is the only sub-agent surface allowed.
 //!
@@ -26,7 +25,8 @@
 //!   Checkpoint restore  — persistent SQLite + SHA-256-guarded restore (core/checkpoint.rs).
 //!   Self-update         — real git source update via `openassistant update`
 //!                         (a desktop button still needs tauri-plugin-updater + an endpoint).
-//!   Discord gateway     — real serenity handler (gateway/discord.rs).
+//!   Gateway channels    — WebChat/Discord/Telegram/Slack all run the real
+//!                         Agent::process loop (gateway/); Slack needs a public URL.
 //!   goal_deliberate     — real per-role LLM deliberation + persisted goals/subgoals.
 //! ────────────────────────────────────────────────────────────────────────────
 
