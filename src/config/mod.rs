@@ -111,6 +111,10 @@ impl Default for ModelConfig {
 pub struct GatewayConfig {
     pub discord_token: String,
     pub discord_allowed_users: Vec<String>,
+    /// Optional "home" channel id: top-level messages here auto-spawn a thread
+    /// (Hermes-style), even without an @mention. Set via the `set home` command.
+    #[serde(default)]
+    pub discord_home_channel: String,
     pub telegram_token: String,
     pub slack_token: String,
     pub slack_signing_secret: String,
@@ -228,6 +232,7 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
                 .collect()
         }
         "gateway.dm_policy" => config.gateway.dm_policy = value.to_string(),
+        "gateway.discord_home_channel" => config.gateway.discord_home_channel = value.to_string(),
         "gateway.webhook_host" => config.gateway.webhook_host = value.to_string(),
         "gateway.webhook_port" => {
             config.gateway.webhook_port = value
