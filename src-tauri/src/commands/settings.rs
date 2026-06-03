@@ -188,3 +188,36 @@ fn rebuild_agent_if_model_changed(turn: &mut crate::state::Turn, cfg: &config::C
             .with_tools_enabled(tools);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_if_present_only_overwrites_with_nonempty() {
+        let mut field = "keep-me".to_string();
+        set_if_present(&mut field, None);
+        assert_eq!(field, "keep-me", "None must not wipe an existing secret");
+        set_if_present(&mut field, Some("   ".into()));
+        assert_eq!(field, "keep-me", "blank must not wipe an existing secret");
+        set_if_present(&mut field, Some("new-value".into()));
+        assert_eq!(field, "new-value");
+    }
+
+    #[test]
+    fn full_config_dto_deserializes_from_frontend_payload() {
+        let json = serde_json::json!({
+            "provider": "openrouter", "model": "m", "api_base": "https://x/v1",
+            "api_key": null, "user_name": "u", "log_level": "info",
+            "tools_enabled": true, "memory_max_entries": 50000, "memory_fts_enabled": true,
+            "skills_dirs": ["a", "b"], "skills_auto_create": false,
+            "discord_token": null, "telegram_token": null, "slack_token": null,
+            "dm_pairing": true, "vision_provider": "gemini-cli", "vision_gemini_path": "gemini"
+        });
+        let dto: FullConfigDto = serde_json::from_value(json).expect("deserialize");
+        assert!(dto.api_key.is_none());
+        assert!(dto.tools_enabled);
+        assert_eq!(dto.skills_dirs, vec!["a", "b"]);
+        assert_eq!(dto.memory_max_entries, 50000);
+    }
+}

@@ -37,6 +37,18 @@ pub struct OnboardingDto {
     pub skills_dirs: Vec<String>,
 }
 
+/// Map a non-2xx HTTP status from the probe to a stable error category. Kept
+/// pure (no I/O) so the mapping is unit-tested without a live endpoint. A 404
+/// is `model_unavailable` (not `auth_failure`) so a missing default model never
+/// looks like a bad key.
+fn classify_error_status(code: u16) -> &'static str {
+    match code {
+        401 | 403 => "auth_failure",
+        404 => "model_unavailable",
+        _ => "network_error",
+    }
+}
+
 /// Route to the wizard on first run (empty api_key) or to Chat otherwise.
 #[tauri::command]
 pub async fn get_app_state() -> Result<AppStateDto, String> {
@@ -96,11 +108,12 @@ pub async fn probe_connection(
             error_message: None,
         }),
         Ok(r) => {
-            let status = r.status();
-            let (error_type, msg) = match status.as_u16() {
-                401 | 403 => ("auth_failure", "Invalid API key.".to_string()),
-                404 => ("model_unavailable", format!("Model `{model}` not found.")),
-                code => ("network_error", format!("Endpoint returned HTTP {code}.")),
+            let code = r.status().as_u16();
+            let error_type = classify_error_status(code);
+            let msg = match error_type {
+                "auth_failure" => "Invalid API key.".to_string(),
+                "model_unavailable" => format!("Model `{model}` not found."),
+                _ => format!("Endpoint returned HTTP {code}."),
             };
             Ok(ProbeResultDto {
                 ok: false,
@@ -184,4 +197,39 @@ pub async fn save_onboarding_config(
     config::save(&cfg).await.map_err(|e| e.to_string())?;
     turn.agent.tools_enabled = cfg.tools.enabled;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_status_classification() {
+        assert_eq!(classify_error_status(401), "auth_failure");
+        assert_eq!(classify_error_status(403), "auth_failure");
+        // 404 must be distinct so a missing default model is not read as a bad key.
+        assert_eq!(classify_error_status(404), "model_unavailable");
+        assert_eq!(classify_error_status(500), "network_error");
+        assert_eq!(classify_error_status(429), "network_error");
+    }
+
+    #[test]
+    fn onboarding_dto_deserializes_from_frontend_payload() {
+        // Locks the frontend↔backend wire contract (snake_case field names).
+        let json = serde_json::json!({
+            "data_dir": "C:\\Users\\x\\.openassistant",
+            "provider": "openrouter",
+            "model": "openrouter/owl-alpha",
+            "api_base": "https://openrouter.ai/api/v1",
+            "api_key": "sk-test",
+            "tools_enabled": false,
+            "user_name": "friend",
+            "skills_dirs": ["C:\\Users\\x\\.openassistant\\skills"]
+        });
+        let dto: OnboardingDto = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(dto.provider, "openrouter");
+        assert!(!dto.tools_enabled);
+        assert_eq!(dto.skills_dirs.len(), 1);
+        assert_eq!(dto.user_name.as_deref(), Some("friend"));
+    }
 }
