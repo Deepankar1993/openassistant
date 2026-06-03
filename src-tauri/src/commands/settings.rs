@@ -81,7 +81,7 @@ fn set_if_present(field: &mut String, incoming: Option<String>) {
 }
 
 /// Read the full config for Settings. The api_key and channel tokens are masked.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_config() -> Result<ConfigDto, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     Ok(ConfigDto {
@@ -114,7 +114,7 @@ pub async fn get_config() -> Result<ConfigDto, String> {
 
 /// Persist the Model section only. Kept as a stable, minimal command (used by the
 /// existing E2E tests and the Settings Model section). Bypasses `config::set()`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn save_config(
     state: State<'_, AppCore>,
     model: String,
@@ -132,7 +132,7 @@ pub async fn save_config(
 }
 
 /// Persist the full config from the expanded Settings view.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn save_full_config(state: State<'_, AppCore>, dto: FullConfigDto) -> Result<(), String> {
     let mut turn = state.turn.lock().await;
     let mut cfg = config::load().await.map_err(|e| e.to_string())?;
@@ -169,7 +169,7 @@ pub async fn save_full_config(state: State<'_, AppCore>, dto: FullConfigDto) -> 
 }
 
 /// Toggle tool execution and persist it so the choice survives a restart.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn set_tools_enabled(state: State<'_, AppCore>, enabled: bool) -> Result<(), String> {
     let mut turn = state.turn.lock().await;
     turn.agent.tools_enabled = enabled;

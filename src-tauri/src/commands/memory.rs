@@ -9,25 +9,25 @@ async fn workspace() -> Result<MemoryWorkspace, String> {
 }
 
 /// Long-term curated memory (`MEMORY.md`).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_memory_md() -> Result<String, String> {
     Ok(workspace().await?.read_long_term())
 }
 
 /// Overwrite `MEMORY.md`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn write_memory_md(content: String) -> Result<(), String> {
     workspace().await?.write_long_term(&content).map_err(|e| e.to_string())
 }
 
 /// Today's daily note (read-only in the UI).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_today_note() -> Result<String, String> {
     Ok(workspace().await?.read_today())
 }
 
 /// Search memory markdown files; returns `[filename, excerpt]` pairs.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn search_memory_files(query: String) -> Result<Vec<[String; 2]>, String> {
     let ws = workspace().await?;
     Ok(ws

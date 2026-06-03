@@ -24,7 +24,7 @@ fn load_engine(cfg: &config::Config) -> SkillEngine {
 }
 
 /// List built-in and custom skills. Built-ins are those without a file path.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn list_skills() -> Result<Vec<SkillDto>, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     let engine = load_engine(&cfg);
@@ -41,7 +41,7 @@ pub async fn list_skills() -> Result<Vec<SkillDto>, String> {
 }
 
 /// Return the markdown content of a named skill.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn read_skill(name: String) -> Result<String, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     let engine = load_engine(&cfg);
@@ -52,7 +52,7 @@ pub async fn read_skill(name: String) -> Result<String, String> {
 }
 
 /// Create a new custom skill markdown file in the first configured skills dir.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn create_skill(name: String, content: String) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {

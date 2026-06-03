@@ -32,7 +32,7 @@ fn result(name: &str, ok: bool, message: impl Into<String>, is_optional: bool) -
 /// Run the same six diagnostics as `cargo run -- doctor`, collected as structured
 /// rows. The skills check uses `load_builtin()` (returns 3) rather than the CLI's
 /// `default()` (returns 0). Vision/Gateway are optional (amber on failure).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn run_doctor() -> Result<Vec<DiagnosticResultDto>, String> {
     let mut out = Vec::new();
 
@@ -84,7 +84,7 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResultDto>, String> {
 
 /// Open a provider-documentation URL in the OS browser (not the webview).
 /// The frontend only ever passes URLs matching the opener capability allowlist.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     // Defense in depth: the opener capability scope only constrains the plugin's
     // own JS API, not this custom command. A compromised webview could invoke us
@@ -98,7 +98,7 @@ pub async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(),
 
 /// List sub-agent definitions (read-only). Execution is intentionally NOT exposed
 /// — `execute_subagent()` returns a hardcoded placeholder regardless of input.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn list_agents() -> Result<Vec<AgentDto>, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     let mut orch = SubAgentOrchestrator::new();

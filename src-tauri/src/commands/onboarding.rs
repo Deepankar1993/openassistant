@@ -51,7 +51,7 @@ fn classify_error_status(code: u16) -> &'static str {
 }
 
 /// Route to the wizard on first run (empty api_key) or to Chat otherwise.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn get_app_state() -> Result<AppStateDto, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     let api_key_set = !cfg.model.api_key.trim().is_empty();
@@ -67,7 +67,7 @@ pub async fn get_app_state() -> Result<AppStateDto, String> {
 /// `Agent::process` — so the user's very first interaction does not write a
 /// daily note or mutate the `UserModel`. Distinguishes auth / model / network
 /// failures so a missing default model never looks like a bad key.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn probe_connection(
     api_key: String,
     api_base: String,
@@ -82,7 +82,23 @@ pub async fn probe_connection(
         });
     }
 
-    let client = reqwest::Client::new();
+    // Build the client explicitly (Client::new() *panics* if the TLS backend
+    // fails to initialize — we never want a probe to crash the command).
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("probe_connection: client build failed: {e}");
+            return Ok(ProbeResultDto {
+                ok: false,
+                latency_ms: 0,
+                error_type: Some("network_error".into()),
+                error_message: Some(format!("HTTP client init failed: {e}")),
+            });
+        }
+    };
     let body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": "hi" }],
@@ -95,11 +111,14 @@ pub async fn probe_connection(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key.trim()))
         .header("Content-Type", "application/json")
+        // OpenRouter recommends these; harmless for other providers.
+        .header("HTTP-Referer", "https://openassistant.ai")
+        .header("X-Title", "openAssistant")
         .json(&body)
-        .timeout(Duration::from_secs(10))
         .send()
         .await;
     let latency_ms = started.elapsed().as_millis() as u64;
+    log::info!("probe_connection -> {url} : {:?} ({latency_ms}ms)", resp.as_ref().map(|r| r.status()));
 
     match resp {
         Ok(r) if r.status().is_success() => Ok(ProbeResultDto {
@@ -135,7 +154,7 @@ pub async fn probe_connection(
 /// Create the data dir (+ `memory/` and `skills/` subdirs) and verify it is
 /// writable. Returns Ok(false) (not Err) for an unwritable path so the UI can
 /// render an inline state for both outcomes.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn check_path_writable(path: String) -> Result<bool, String> {
     let base = std::path::PathBuf::from(&path);
     if tokio::fs::create_dir_all(base.join("memory")).await.is_err() {
@@ -156,7 +175,7 @@ pub async fn check_path_writable(path: String) -> Result<bool, String> {
 
 /// Native folder picker for the data dir. Runs the blocking dialog off the async
 /// executor; converts `FilePath` via `.as_path()` (not the enum's `to_string`).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn pick_data_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
@@ -169,7 +188,7 @@ pub async fn pick_data_dir(app: tauri::AppHandle) -> Result<Option<String>, Stri
 }
 
 /// Save all wizard fields at once via the full load/mutate/save path.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn save_onboarding_config(
     state: State<'_, AppCore>,
     dto: OnboardingDto,
@@ -218,6 +237,20 @@ mod tests {
         assert_eq!(classify_error_status(404), "model_unavailable");
         assert_eq!(classify_error_status(500), "network_error");
         assert_eq!(classify_error_status(429), "network_error");
+    }
+
+    // Manual network repro: cargo test -p openassistant-desktop --lib -- --ignored --nocapture live_probe
+    #[tokio::test]
+    #[ignore]
+    async fn live_probe() {
+        let key = std::env::var("OPENROUTER_TEST_KEY").unwrap_or_default();
+        let r = super::probe_connection(
+            key,
+            "https://openrouter.ai/api/v1".into(),
+            "openrouter/owl-alpha".into(),
+        )
+        .await;
+        println!("PROBE RESULT: {:?}", r);
     }
 
     #[test]
