@@ -378,6 +378,16 @@ async function installMock(page, opts = {}) {
               },
             ];
 
+          case "gateway_readiness":
+            return [
+              { name: "API key", ok: !!mockState.config.api_key_set, required: true, detail: "Model API key state." },
+              { name: "WebChat server", ok: true, required: false, detail: "Will listen on http://0.0.0.0:3000." },
+              { name: "Discord", ok: false, required: false, detail: "Not configured (optional)." },
+              { name: "Telegram", ok: false, required: false, detail: "Not configured (optional)." },
+              { name: "Slack", ok: false, required: false, detail: "Not configured (optional)." },
+              { name: "How to run", ok: true, required: false, detail: "Start with `openassistant gateway`." },
+            ];
+
           case "list_agents":
             return mockState.agents.slice();
           case "get_persona":

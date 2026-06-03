@@ -23,7 +23,12 @@ enum Commands {
         #[arg(long, default_value = "3000")] port: u16,
     },
     Chat,
-    Gateway,
+    /// Run the messaging gateway (WebChat + Discord/Telegram/Slack if configured)
+    Gateway {
+        /// Print the gateway readiness report and exit without starting servers.
+        #[arg(long)]
+        check: bool,
+    },
     Onboard,
     Config {
         #[arg(long)] key: Option<String>,
@@ -114,7 +119,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::Chat => {
             ui::tui::run_tui().await?;
         }
-        Commands::Gateway => {
+        Commands::Gateway { check } => {
+            let config = config::load().await?;
+            // Surface the readiness report on the terminal (always), then either
+            // exit (--check) or start the servers.
+            print!("{}", gateway::format_readiness(&gateway::readiness(&config)));
+            if check {
+                return Ok(());
+            }
+            println!();
             gateway::start_gateway().await?;
         }
         Commands::Onboard => {

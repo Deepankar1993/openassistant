@@ -269,11 +269,42 @@
 
             <!-- Channels section -->
             <div class="settings-section hidden" id="settings-section-channels" data-testid="settings-channels">
-              <h2>Channels</h2>
-              <div class="callout warn-callout" style="margin-bottom:18px;">
-                Gateway channels are experimental — the messaging server is not yet fully operational.
+              <h2>Channels &amp; Gateway</h2>
+              <p class="section-hint">All channels route through the real agent. Start the messaging server with <code>openassistant gateway</code>.</p>
+
+              <!-- Readiness panel -->
+              <div class="card" style="margin-bottom:18px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                  <h3 style="margin:0;">Setup requirements</h3>
+                  <button type="button" class="btn small primary" id="gateway-check-btn" data-testid="gateway-check">Check requirements</button>
+                </div>
+                <div id="gateway-readiness" data-testid="gateway-readiness" class="doctor-results">
+                  <div class="hint">Click "Check requirements" to verify your gateway setup.</div>
+                </div>
+                <div class="field" style="margin-top:12px;">
+                  <span>Start command</span>
+                  <div class="input-row">
+                    <input type="text" id="gateway-run-cmd" data-testid="gateway-run-cmd" readonly value="openassistant gateway" />
+                    <button type="button" class="btn small" id="gateway-copy-cmd">Copy</button>
+                  </div>
+                  <small class="hint">If <code>openassistant</code> isn't on your PATH, run <code>cargo run -- gateway</code> from the project, or the built binary in <code>target/release</code>.</small>
+                </div>
               </div>
+
               <form class="form" id="settings-channels-form" autocomplete="off">
+                <h3 style="margin:0 0 6px;">WebChat server</h3>
+                <div class="persona-row">
+                  <label class="field" style="flex:1">
+                    <span>Host / IP</span>
+                    <input type="text" id="cfg-webhook-host" data-testid="settings-webhook-host" placeholder="0.0.0.0" />
+                  </label>
+                  <label class="field" style="flex:0 0 140px">
+                    <span>Port</span>
+                    <input type="number" id="cfg-webhook-port" data-testid="settings-webhook-port" min="0" max="65535" placeholder="3000" />
+                  </label>
+                </div>
+
+                <h3 style="margin:14px 0 6px;">Discord</h3>
                 <label class="field">
                   <span>Discord token</span>
                   <div class="input-row">
@@ -283,6 +314,19 @@
                   <small class="hint" id="discord-token-hint"></small>
                 </label>
                 <label class="field">
+                  <span>Allowed user IDs <small class="hint">(comma-separated, or * for all)</small></span>
+                  <input type="text" id="cfg-discord-allowed" data-testid="settings-discord-allowed" placeholder="123456789012345678, …" />
+                </label>
+                <label class="field">
+                  <span>DM policy</span>
+                  <select id="cfg-dm-policy" data-testid="settings-dm-policy">
+                    <option value="pairing">pairing (allowlist only)</option>
+                    <option value="open">open (anyone can message)</option>
+                  </select>
+                </label>
+
+                <h3 style="margin:14px 0 6px;">Telegram</h3>
+                <label class="field">
                   <span>Telegram token</span>
                   <div class="input-row">
                     <input type="password" id="cfg-telegram-token" data-testid="settings-telegram-token" placeholder="Paste to set or update" />
@@ -290,6 +334,8 @@
                   </div>
                   <small class="hint" id="telegram-token-hint"></small>
                 </label>
+
+                <h3 style="margin:14px 0 6px;">Slack</h3>
                 <label class="field">
                   <span>Slack token</span>
                   <div class="input-row">
@@ -298,6 +344,8 @@
                   </div>
                   <small class="hint" id="slack-token-hint"></small>
                 </label>
+                <p class="hint">Slack also needs a signing secret (<code>gateway.slack_signing_secret</code>) and a public URL — set those via config.yaml or the CLI.</p>
+
                 <div class="field toggle">
                   <label class="switch">
                     <input type="checkbox" id="cfg-dm-pairing" data-testid="settings-dm-pairing" />

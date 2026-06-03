@@ -100,6 +100,7 @@ pub fn run() {
             commands::skills::create_skill,
             // system
             commands::system::run_doctor,
+            commands::system::gateway_readiness,
             commands::system::open_external_url,
             commands::system::list_agents,
         ])
