@@ -25,14 +25,26 @@ pub async fn start_gateway() -> Result<()> {
         });
     }
 
-    // Start Telegram if configured
+    // Start Telegram if configured (long-poll loop on its own task).
     if !config.gateway.telegram_token.is_empty() {
         info!("Telegram token configured, starting Telegram handler...");
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = telegram::start(cfg).await {
+                tracing::error!("Telegram gateway error: {}", e);
+            }
+        });
     }
 
-    // Start WebChat
-    info!("Starting Web Chat on port {}", config.gateway.webhook_port);
-    webchat::start(config.gateway.webhook_port).await?;
+    // Slack is served by the WebChat axum server (POST /slack/events) when
+    // configured; it needs a publicly reachable URL.
+    if !config.gateway.slack_token.is_empty() || !config.gateway.slack_signing_secret.is_empty() {
+        info!("Slack configured — Events endpoint will be served at POST /slack/events (requires a public URL).");
+    }
+
+    // WebChat is the blocking foreground server and also hosts the Slack route.
+    info!("Starting WebChat messaging server (real agent loop)...");
+    webchat::start(config).await?;
 
     Ok(())
 }
