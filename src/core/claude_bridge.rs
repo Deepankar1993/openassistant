@@ -27,6 +27,16 @@ pub struct ClaudeResult {
     pub cost_usd: Option<f64>,
 }
 
+/// Who initiated a bridge call. The **local operator** (the `openassistant
+/// claude` CLI on this machine) is trusted with full autonomy; **remote**
+/// callers (Discord authors, LLM tool-loop) are capped to a non-bypass
+/// permission mode and can never trigger `--dangerously-skip-permissions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeOrigin {
+    Operator,
+    Remote,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeBridge {
     bin: String,
@@ -36,6 +46,7 @@ pub struct ClaudeBridge {
     skip_permissions: bool,
     append_system_prompt: String,
     timeout_secs: u64,
+    origin: BridgeOrigin,
 }
 
 impl ClaudeBridge {
@@ -55,7 +66,16 @@ impl ClaudeBridge {
             skip_permissions: cfg.skip_permissions,
             append_system_prompt: cfg.append_system_prompt.clone(),
             timeout_secs: if cfg.timeout_secs == 0 { 300 } else { cfg.timeout_secs },
+            // Safe by default: only the local-operator CLI path opts into trust.
+            origin: BridgeOrigin::Remote,
         }
+    }
+
+    /// Mark this bridge as operator-initiated (local `openassistant claude` CLI),
+    /// permitting `--dangerously-skip-permissions` / `bypassPermissions`.
+    pub fn operator(mut self) -> Self {
+        self.origin = BridgeOrigin::Operator;
+        self
     }
 
     /// Override / extend the appended system prompt (used to inject persona +
@@ -95,11 +115,19 @@ impl ClaudeBridge {
             args.push("--append-system-prompt".to_string());
             args.push(self.append_system_prompt.clone());
         }
-        if self.skip_permissions {
+        // Permission policy is origin-aware. The nuclear bypass is reachable
+        // ONLY from the local operator CLI; remote callers (Discord/LLM tool)
+        // are capped to a non-bypass mode regardless of config, so an allowlisted
+        // chat author can't escalate to full unsandboxed autonomy.
+        let operator = self.origin == BridgeOrigin::Operator;
+        if self.skip_permissions && operator {
             args.push("--dangerously-skip-permissions".to_string());
-        } else if !self.permission_mode.trim().is_empty() {
-            args.push("--permission-mode".to_string());
-            args.push(self.permission_mode.clone());
+        } else {
+            let mode = effective_permission_mode(&self.permission_mode, operator);
+            if !mode.is_empty() {
+                args.push("--permission-mode".to_string());
+                args.push(mode);
+            }
         }
         if let Some(sid) = resume {
             if !sid.is_empty() {
@@ -147,6 +175,20 @@ impl ClaudeBridge {
 
         Ok(parse_result(&stdout, &stderr))
     }
+}
+
+/// Resolve the `--permission-mode` to actually use. Empty config ⇒ `acceptEdits`.
+/// For non-operator (remote) callers, the full-bypass mode is downgraded so a
+/// Discord/LLM-driven prompt can never bypass all permission checks.
+fn effective_permission_mode(configured: &str, operator: bool) -> String {
+    let m = configured.trim();
+    if m.is_empty() {
+        return "acceptEdits".to_string();
+    }
+    if !operator && m.eq_ignore_ascii_case("bypassPermissions") {
+        return "acceptEdits".to_string();
+    }
+    m.to_string()
 }
 
 /// Parse `claude --output-format json` stdout. Falls back to raw text if the
@@ -204,13 +246,33 @@ mod tests {
     }
 
     #[test]
-    fn skip_permissions_replaces_mode() {
+    fn skip_permissions_honored_only_for_operator() {
         let mut cfg = ClaudeBridgeConfig::default();
         cfg.skip_permissions = true;
-        let b = ClaudeBridge::from_config(&cfg, ".");
-        let args = b.build_args(None);
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(!args.contains(&"--permission-mode".to_string()));
+
+        // Operator (local CLI) → full bypass allowed.
+        let op = ClaudeBridge::from_config(&cfg, ".").operator().build_args(None);
+        assert!(op.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!op.contains(&"--permission-mode".to_string()));
+
+        // Remote (Discord / LLM tool) → bypass refused, capped to a mode.
+        let remote = ClaudeBridge::from_config(&cfg, ".").build_args(None);
+        assert!(!remote.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(remote.contains(&"--permission-mode".to_string()));
+    }
+
+    #[test]
+    fn remote_downgrades_bypass_mode_but_operator_keeps_it() {
+        let mut cfg = ClaudeBridgeConfig::default();
+        cfg.permission_mode = "bypassPermissions".to_string();
+
+        let remote = ClaudeBridge::from_config(&cfg, ".").build_args(None);
+        let ri = remote.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(remote[ri + 1], "acceptEdits", "remote bypass is downgraded");
+
+        let op = ClaudeBridge::from_config(&cfg, ".").operator().build_args(None);
+        let oi = op.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(op[oi + 1], "bypassPermissions", "operator keeps configured mode");
     }
 
     #[test]
