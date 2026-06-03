@@ -118,6 +118,8 @@ pub async fn run_wizard() -> Result<()> {
             gemini_path: "gemini".to_string(),
         },
         tools: crate::config::ToolsConfig::default(),
+        providers: vec![],
+        routing: crate::config::RoutingConfig::default(),
     };
 
     crate::config::save(&config).await?;

@@ -175,51 +175,29 @@ impl Agent {
         messages
     }
 
+    /// Resolve the `(api_base, api_key, model)` for the `text` modality.
+    ///
+    /// Multi-model routing is strictly opt-in: when `routing.text` names a real
+    /// provider we use the resolved triple; otherwise we reproduce the legacy
+    /// behavior exactly — the agent's own `self.model` against `config.model.*`
+    /// creds. (Risk 5: routing must not silently override `Agent::new(model)`.)
+    fn text_target<'a>(&'a self, config: &'a crate::config::Config) -> (&'a str, &'a str, &'a str) {
+        let route = &config.routing.text;
+        let routing_active = !route.provider.is_empty()
+            && !route.model.is_empty()
+            && config.providers.iter().any(|p| p.name == route.provider);
+        if routing_active {
+            crate::config::resolve_provider(config, "text")
+        } else {
+            (&config.model.api_base, &config.model.api_key, self.model.as_str())
+        }
+    }
+
     async fn call_llm(&self, messages: &[serde_json::Value]) -> Result<String> {
         let config = crate::config::load().await?;
         let client = reqwest::Client::new();
-
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 8192,
-        });
-
-        if config.model.api_key.trim().is_empty() {
-            anyhow::bail!(
-                "No API key configured. Set `model.api_key` (provider: {}) before chatting.",
-                config.model.provider
-            );
-        }
-
-        let resp = client
-            .post(format!("{}/chat/completions", config.model.api_base))
-            .header("Authorization", format!("Bearer {}", config.model.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        // Surface transport/HTTP errors instead of silently returning an empty
-        // string (the default empty api_key otherwise yields a blank reply).
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let snippet: String = body.chars().take(500).collect();
-            anyhow::bail!("LLM request failed: HTTP {status} — {snippet}");
-        }
-
-        let json: serde_json::Value = resp.json().await?;
-        let content = json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
-        // NOTE: we deliberately do NOT bail on empty content. A 2xx response with
-        // empty/null content is valid for some providers; the real silent-failure
-        // cases (missing key, non-2xx) are already handled above.
-        Ok(content)
+        let (api_base, api_key, model) = self.text_target(&config);
+        call_llm_raw(&client, api_base, api_key, model, messages).await
     }
 
     async fn handle_tool_calls(
@@ -296,6 +274,10 @@ impl Agent {
                 "goal_deliberate" => {
                     self.handle_goal_deliberate(&tool_call.arguments).await
                 }
+                "goal_create" => self.handle_goal_create(&tool_call.arguments).await,
+                "goal_subgoal" => self.handle_goal_subgoal(&tool_call.arguments).await,
+                "goal_task" => self.handle_goal_task(&tool_call.arguments).await,
+                "goal_list" => self.handle_goal_list().await,
                 "task" => {
                     self.handle_task_tool(&tool_call.arguments).await
                 }
@@ -369,43 +351,95 @@ impl Agent {
         let goal_id = format!("goal_{}", uuid::Uuid::new_v4());
         deliberator.start_deliberation(&goal_id, title, description);
 
-        // Simulate multi-agent deliberation
-        let roles = deliberator.default_roles().to_vec();
-        let mut contributions = Vec::new();
+        // Each deliberation role makes a real LLM call with its role prompt and
+        // the accumulated context of prior contributions.
+        let config = crate::config::load().await?;
+        let client = reqwest::Client::new();
+        let (api_base, api_key, model) = self.text_target(&config);
 
+        let roles = deliberator.default_roles().to_vec();
         for role in &roles {
-            if let Some(prompt) = deliberator.build_role_prompt(&goal_id, role) {
-                // In a full implementation, each role would call the LLM
-                // For now, we create a structured deliberation framework
-                let contribution = format!(
-                    "[{} {} would analyze this goal here with LLM call]\nPrompt preview: {}",
-                    role.emoji(),
-                    role.name(),
-                    &prompt[..prompt.len().min(200)]
-                );
-                deliberator.add_contribution(&goal_id, role.clone(), &contribution, Some(0.8));
-                contributions.push(format!("{} {}: Analysis pending LLM call", role.emoji(), role.name()));
+            let Some(prompt) = deliberator.build_role_prompt(&goal_id, role) else { continue };
+            let messages = vec![serde_json::json!({ "role": "user", "content": prompt })];
+            let content = match call_llm_raw(&client, api_base, api_key, model, &messages).await {
+                Ok(c) if !c.trim().is_empty() => c,
+                Ok(_) => format!("[{} returned no content]", role.name()),
+                Err(e) => format!("[{} failed: {}]", role.name(), e),
+            };
+            let is_synth = matches!(role, super::goal_system::DeliberationRole::Synthesizer);
+            deliberator.add_contribution(&goal_id, role.clone(), &content, Some(0.8));
+            if is_synth {
+                deliberator.set_synthesis(&goal_id, &content);
             }
         }
 
-        let output = format!(
-            "🎯 Multi-Agent Goal Deliberation Started\n\
-            Goal: {}\n\
-            Description: {}\n\
-            \n\
-            Agents spawned:\n{}\n\
-            \n\
-            {}\n\
-            \n\
-            In a full implementation, each agent would call the LLM with its role prompt.\n\
-            The Synthesizer would then combine all perspectives into a final plan.",
-            title,
-            description,
-            contributions.join("\n"),
-            deliberator.format_deliberation(&goal_id)
-        );
+        // Persist the deliberated goal so it survives across runs.
+        if let Ok(mut store) = super::goal_store::GoalStore::open_default() {
+            if let Err(e) = store.create_goal(title, description) {
+                tracing::warn!("Could not persist deliberated goal: {}", e);
+            }
+        }
 
-        Ok(output)
+        Ok(deliberator.format_deliberation(&goal_id))
+    }
+
+    // ── Goal / subgoal tools (persisted via GoalStore) ──
+
+    async fn handle_goal_create(&self, args: &serde_json::Value) -> Result<String> {
+        let title = args["title"].as_str().unwrap_or("Untitled Goal");
+        let description = args["description"].as_str().unwrap_or("");
+        let mut store = super::goal_store::GoalStore::open_default()?;
+        let id = store.create_goal(title, description)?;
+        Ok(format!("🎯 Created goal '{}' [{}]", title, &id[..id.len().min(8)]))
+    }
+
+    async fn handle_goal_subgoal(&self, args: &serde_json::Value) -> Result<String> {
+        let goal = args["goal"].as_str().unwrap_or("");
+        let title = args["title"].as_str().unwrap_or("Untitled Subgoal");
+        let description = args["description"].as_str().unwrap_or("");
+        let mut store = super::goal_store::GoalStore::open_default()?;
+        match store.resolve_goal_id(goal) {
+            Some(gid) => match store.add_subgoal(&gid, title, description)? {
+                Some(sid) => Ok(format!(
+                    "➕ Added subgoal '{}' [{}] to goal [{}]",
+                    title, &sid[..sid.len().min(8)], &gid[..gid.len().min(8)]
+                )),
+                None => Ok("Failed to add subgoal.".to_string()),
+            },
+            None => Ok(format!("No goal matching '{}'. Use goal_list to see goals.", goal)),
+        }
+    }
+
+    async fn handle_goal_task(&self, args: &serde_json::Value) -> Result<String> {
+        let goal = args["goal"].as_str().unwrap_or("");
+        let subgoal = args["subgoal"].as_str().unwrap_or("");
+        let title = args["title"].as_str().unwrap_or("Untitled Task");
+        let mut store = super::goal_store::GoalStore::open_default()?;
+        let gid = match store.resolve_goal_id(goal) {
+            Some(g) => g,
+            None => return Ok(format!("No goal matching '{}'.", goal)),
+        };
+        let sgid = store.board.get_goal(&gid).and_then(|g| {
+            g.subgoals
+                .iter()
+                .find(|s| s.id == subgoal || s.id.starts_with(subgoal) || s.title.eq_ignore_ascii_case(subgoal))
+                .map(|s| s.id.clone())
+        });
+        match sgid {
+            Some(sid) => match store.add_task(&gid, &sid, title)? {
+                Some(tid) => Ok(format!(
+                    "✅ Added task '{}' [{}] under subgoal [{}]",
+                    title, &tid[..tid.len().min(8)], &sid[..sid.len().min(8)]
+                )),
+                None => Ok("Failed to add task.".to_string()),
+            },
+            None => Ok(format!("No subgoal matching '{}' in goal [{}].", subgoal, &gid[..gid.len().min(8)])),
+        }
+    }
+
+    async fn handle_goal_list(&self) -> Result<String> {
+        let store = super::goal_store::GoalStore::open_default()?;
+        Ok(store.format())
     }
 
     async fn handle_task_tool(&self, args: &serde_json::Value) -> Result<String> {
@@ -552,7 +586,7 @@ impl Agent {
                 Ok(format!("Command output:\n{}", result.output))
             }
             "self_update" => {
-                Ok("To update openAssistant, run: cargo update && cargo build --release (or ask your user to run 'openassistant update')".to_string())
+                Ok("To see pending updates run `openassistant update --check`; to apply them run `openassistant update` (git-based, source checkouts only).".to_string())
             }
             "set_persona" => {
                 let key = args["key"].as_str().unwrap_or("");
@@ -640,6 +674,26 @@ impl Agent {
                 parameters: serde_json::json!({"type": "object", "properties": {"subagent_type": {"type": "string"}, "description": {"type": "string"}, "prompt": {"type": "string"}}}),
             },
             ToolDefinition {
+                name: "goal_create".to_string(),
+                description: "Create a persisted goal. Args: {\"title\": \"...\", \"description\": \"...\"}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}}}),
+            },
+            ToolDefinition {
+                name: "goal_subgoal".to_string(),
+                description: "Add a subgoal to a goal (by id-prefix or title). Args: {\"goal\": \"...\", \"title\": \"...\", \"description\": \"...\"}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"goal": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}}}),
+            },
+            ToolDefinition {
+                name: "goal_task".to_string(),
+                description: "Add a task under a subgoal. Args: {\"goal\": \"...\", \"subgoal\": \"...\", \"title\": \"...\"}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"goal": {"type": "string"}, "subgoal": {"type": "string"}, "title": {"type": "string"}}}),
+            },
+            ToolDefinition {
+                name: "goal_list".to_string(),
+                description: "List persisted goals with subgoal progress. Args: {}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
                 name: "plan_mode".to_string(),
                 description: "Toggle plan mode. Args: {\"action\": \"toggle|on|off|status\"}".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}}}),
@@ -682,4 +736,54 @@ impl Agent {
 fn push_str(buf: &mut String, s: &str) {
     buf.push_str(s);
     buf.push('\n');
+}
+
+/// Make a single chat-completions call to an OpenAI-compatible endpoint.
+///
+/// This is the shared LLM primitive reused by the agent loop, the workflow
+/// engine, and goal deliberation — each passes its own (shared) `reqwest::Client`
+/// and the resolved provider credentials/model. Surfaces transport/HTTP errors
+/// instead of silently returning an empty string.
+pub(crate) async fn call_llm_raw(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[serde_json::Value],
+) -> Result<String> {
+    if api_key.trim().is_empty() {
+        anyhow::bail!(
+            "No API key configured for model '{}'. Set model.api_key (or the routed provider's key) first.",
+            model
+        );
+    }
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 8192,
+    });
+
+    let resp = client
+        .post(format!("{}/chat/completions", api_base))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(500).collect();
+        anyhow::bail!("LLM request failed: HTTP {status} — {snippet}");
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    // A 2xx with empty/null content is valid for some providers; do not bail.
+    Ok(json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
