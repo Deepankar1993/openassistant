@@ -3,9 +3,1051 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>openAssistant</title>
+
+<!-- Theme bootstrap: runs before first paint so dark mode doesn't flash.
+     Manual choice persists in localStorage("oa-theme"); otherwise we follow
+     the OS preference. The hljs stylesheet href is swapped to match. -->
+<script>
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem("oa-theme"); } catch (e) {}
+    var theme = stored || (window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+
+<link id="hljs-theme" rel="stylesheet" href="/vendor/hljs-github.min.css">
+
+<style>
+/* ════════════════════════════════════════════════════════════════════
+   Warm editorial workshop — design tokens
+   ════════════════════════════════════════════════════════════════════ */
+:root {
+  --bg: #faf8f4;            /* warm paper */
+  --text: #2a2622;
+  --hair: #e6e1d8;          /* hairlines */
+  --tint: #f0ebe2;          /* user-bubble tint */
+  --muted: #6f685d;
+  --accent: #b45309;        /* burnt ochre */
+  --accent-hover: #92400e;
+  --error: #b3473d;
+  --radius: 10px;           /* the one radius token */
+  --serif: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  --col: 760px;
+}
+[data-theme="dark"] {
+  --bg: #1a1816;            /* warm charcoal */
+  --text: #e8e4dd;
+  --hair: #33302b;
+  --tint: #262320;
+  --muted: #948c7f;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Visible focus rings, accent-colored */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+svg.icon {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  flex-shrink: 0;
+  display: block;
+}
+
+/* ── Sticky header ─────────────────────────────────────────────────── */
+header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+}
+.header-inner {
+  max-width: var(--col);
+  margin: 0 auto;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.app-name {
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--hair); }
+
+/* Theme toggle shows the icon for the theme you'd switch TO */
+[data-theme="dark"] #icon-moon { display: none; }
+[data-theme="light"] #icon-sun { display: none; }
+:root:not([data-theme="dark"]) #icon-sun { display: none; }
+
+/* ── Message column ────────────────────────────────────────────────── */
+main {
+  max-width: var(--col);
+  margin: 0 auto;
+  padding: 32px 24px 200px;  /* bottom padding clears the fixed composer */
+}
+
+#messages { display: flex; flex-direction: column; gap: 28px; }
+
+.turn { animation: rise 150ms ease-out; }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* User turns: right-aligned tinted blocks */
+.turn.user { display: flex; justify-content: flex-end; }
+.turn.user .msg-content {
+  background: var(--tint);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  max-width: 85%;
+}
+
+/* Assistant turns: bubble-less, flat on the page, thin left rule */
+.turn.assistant {
+  border-left: 2px solid var(--hair);
+  padding-left: 18px;
+}
+.assistant-name {
+  font-family: var(--serif);
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+/* Markdown content */
+.msg-content { overflow-wrap: break-word; }
+.msg-content.plain { white-space: pre-wrap; }  /* vendor-less fallback */
+.msg-content > :first-child { margin-top: 0; }
+.msg-content > :last-child { margin-bottom: 0; }
+.msg-content p { margin: 0.6em 0; }
+.msg-content h1, .msg-content h2, .msg-content h3,
+.msg-content h4, .msg-content h5, .msg-content h6 {
+  font-family: var(--serif);
+  line-height: 1.3;
+  margin: 1.1em 0 0.45em;
+}
+.msg-content h1 { font-size: 1.5em; }
+.msg-content h2 { font-size: 1.3em; }
+.msg-content h3 { font-size: 1.15em; }
+.msg-content ul, .msg-content ol { padding-left: 1.5em; margin: 0.6em 0; }
+.msg-content li { margin: 0.2em 0; }
+.msg-content blockquote {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--hair);
+  color: var(--muted);
+}
+.msg-content hr { border: none; border-top: 1px solid var(--hair); margin: 1.2em 0; }
+.msg-content table { border-collapse: collapse; margin: 0.8em 0; width: 100%; }
+.msg-content th, .msg-content td {
+  border: 1px solid var(--hair);
+  padding: 5px 10px;
+  text-align: left;
+}
+.msg-content img { max-width: 100%; border-radius: var(--radius); }
+.msg-content code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--tint);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.msg-content pre {
+  margin: 0.8em 0;
+  padding: 12px 14px;
+  background: var(--tint);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.msg-content pre code { background: none; padding: 0; display: block; }
+
+/* Fenced code block wrapper: header bar (language + copy) above the pre */
+.code-block { margin: 0.8em 0; border: 1px solid var(--hair); border-radius: var(--radius); overflow: hidden; }
+.code-block .code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 4px 14px;
+  border-bottom: 1px solid var(--hair);
+  background: var(--tint);
+}
+.code-block .code-lang {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.code-block .copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.code-block .copy-btn:hover { color: var(--text); }
+.code-block .copy-btn svg.icon { width: 14px; height: 14px; }
+.code-block pre { margin: 0; border: none; border-radius: 0; }
+
+/* ── Streaming cursor: blinking block, no bouncing dots ───────────── */
+.stream-cursor {
+  display: inline;
+  color: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
+  user-select: none;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── Tool steps: compact <details> rows inside the assistant turn ─── */
+.tool-step {
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  margin: 10px 0;
+  font-size: 13px;
+}
+.tool-step summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted);
+  user-select: none;
+}
+.tool-step summary::-webkit-details-marker { display: none; }
+.tool-step .tool-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.tool-step .tool-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-step .tool-status { display: inline-flex; }
+.tool-step .tool-status svg.icon { width: 15px; height: 15px; }
+.tool-step.ok .tool-status { color: var(--accent); }
+.tool-step.fail .tool-status { color: var(--error); }
+.tool-step .chev { transition: transform 150ms ease-out; color: var(--muted); }
+.tool-step .chev svg.icon { width: 14px; height: 14px; }
+.tool-step[open] .chev { transform: rotate(90deg); }
+.tool-step pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--hair);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  color: var(--muted);
+}
+.spinner { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Inline error row ──────────────────────────────────────────────── */
+.error-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--hair);
+  border-left: 2px solid var(--error);
+  border-radius: var(--radius);
+  color: var(--error);
+  font-size: 13px;
+}
+.error-row .error-msg { flex: 1; min-width: 0; overflow-wrap: break-word; }
+.error-row .retry-btn {
+  border: 1px solid var(--error);
+  background: transparent;
+  color: var(--error);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.error-row .retry-btn:hover { background: var(--tint); }
+
+/* ── Empty state ───────────────────────────────────────────────────── */
+#empty-state { text-align: center; padding: 12vh 0 0; }
+#empty-state .persona {
+  font-family: var(--serif);
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+#empty-state .tagline { color: var(--muted); margin: 0 0 32px; }
+.chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.chip {
+  border: 1px solid var(--hair);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Jump-to-bottom pill ───────────────────────────────────────────── */
+#jump-btn {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 112px;
+  z-index: 9;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: var(--accent);
+  color: #faf8f4;
+  font-family: var(--sans);
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(42, 38, 34, 0.18);
+}
+#jump-btn:hover { background: var(--accent-hover); }
+#jump-btn.visible { display: inline-flex; }
+
+/* ── Composer (fixed bottom) ───────────────────────────────────────── */
+#composer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-top: 1px solid var(--hair);
+  padding: 12px 24px 18px;
+}
+.composer-inner {
+  max-width: var(--col);
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 8px 8px 16px;
+}
+.composer-inner:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+#input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.65;
+  resize: none;
+  padding: 4px 0;
+  max-height: 173px;  /* ~7 lines */
+  overflow-y: auto;
+}
+#input::placeholder { color: var(--muted); }
+#send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #faf8f4;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#send-btn:hover { background: var(--accent-hover); }
+#send-btn:disabled { opacity: 0.45; cursor: default; }
+#send-btn:disabled:hover { background: var(--accent); }
+#send-btn .icon-stop { display: none; }
+#send-btn.streaming .icon-stop { display: block; }
+#send-btn.streaming .icon-send { display: none; }
+.composer-hint {
+  max-width: var(--col);
+  margin: 6px auto 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .header-inner, main { padding-left: 16px; padding-right: 16px; }
+  #composer { padding-left: 16px; padding-right: 16px; }
+  .turn.user .msg-content { max-width: 92%; }
+  .composer-hint { display: none; }
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .turn { animation: none; }
+  .stream-cursor { animation: none; }
+  .tool-step .chev { transition: none; }
+}
+</style>
 </head>
 <body>
-<p>openAssistant WebChat — placeholder page (frontend lands in this file).</p>
+
+<header>
+  <div class="header-inner">
+    <h1 class="app-name">openAssistant</h1>
+    <button id="theme-btn" class="icon-btn" type="button" aria-label="Toggle color theme">
+      <!-- sun (shown in dark mode = switch to light) -->
+      <svg id="icon-sun" class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      <!-- moon (shown in light mode = switch to dark) -->
+      <svg id="icon-moon" class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div id="empty-state" hidden>
+    <p class="persona">openAssistant</p>
+    <p class="tagline">Your assistant. Local, private, yours.</p>
+    <div class="chips">
+      <button class="chip" type="button">What can you do?</button>
+      <button class="chip" type="button">Search the web for today's Rust news</button>
+      <button class="chip" type="button">What do you remember about me?</button>
+    </div>
+  </div>
+  <div id="messages" aria-live="polite"></div>
+</main>
+
+<button id="jump-btn" type="button" aria-label="Jump to bottom">
+  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+  <span>Jump to bottom</span>
+</button>
+
+<div id="composer">
+  <div class="composer-inner">
+    <textarea id="input" rows="1" placeholder="Message openAssistant…" aria-label="Message"></textarea>
+    <button id="send-btn" type="button" aria-label="Send message">
+      <svg class="icon icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+      <svg class="icon icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+    </button>
+  </div>
+  <div class="composer-hint">Enter to send · Shift+Enter for a new line</div>
+</div>
+
+<!-- Vendored libraries (served by the gateway, embedded in the binary).
+     All usage below is guarded — if any fail to load we fall back to
+     escaped plain-text rendering. -->
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+
+<script>
+"use strict";
+(function () {
+
+  // ── DOM handles ──────────────────────────────────────────────────
+  var messagesEl = document.getElementById("messages");
+  var emptyEl = document.getElementById("empty-state");
+  var inputEl = document.getElementById("input");
+  var sendBtn = document.getElementById("send-btn");
+  var jumpBtn = document.getElementById("jump-btn");
+  var themeBtn = document.getElementById("theme-btn");
+  var hljsLink = document.getElementById("hljs-theme");
+
+  // ── App state ────────────────────────────────────────────────────
+  var streaming = false;        // a turn is currently in flight
+  var controller = null;        // AbortController for the active stream
+  var lastUserText = null;      // last user message (for Retry)
+  var following = true;         // auto-scroll follows the stream
+
+  var reducedMotion = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ── Inline SVG icon factory (Lucide-style line icons) ────────────
+  var ICONS = {
+    spinner: '<svg class="icon spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>',
+    check:   '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+    x:       '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    chevron: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+    copy:    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+  };
+
+  // ── Theme ────────────────────────────────────────────────────────
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    hljsLink.href = theme === "dark"
+      ? "/vendor/hljs-github-dark.min.css"
+      : "/vendor/hljs-github.min.css";
+  }
+  // Sync the hljs sheet with whatever the bootstrap script picked.
+  applyTheme(document.documentElement.getAttribute("data-theme") || "light");
+
+  themeBtn.addEventListener("click", function () {
+    var next = document.documentElement.getAttribute("data-theme") === "dark"
+      ? "light" : "dark";
+    applyTheme(next);
+    try { localStorage.setItem("oa-theme", next); } catch (e) {}
+  });
+
+  // ── Markdown pipeline ────────────────────────────────────────────
+  var TOOL_MARKUP = /\[TOOL:\w+:\{.*?\}\]/g;
+
+  /** Strip inline [TOOL:...] markup — tool timeline rows represent those. */
+  function stripToolMarkup(text) {
+    return (text || "").replace(TOOL_MARKUP, "");
+  }
+
+  var mdReady = typeof marked !== "undefined" && typeof DOMPurify !== "undefined";
+  if (mdReady && marked.setOptions) {
+    marked.setOptions({ gfm: true, breaks: true });
+  }
+
+  /** Render markdown (sanitized) into el; fall back to escaped plain text. */
+  function renderMarkdown(el, text) {
+    if (mdReady) {
+      try {
+        el.classList.remove("plain");
+        el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+        return;
+      } catch (e) { /* fall through to plain text */ }
+    }
+    el.classList.add("plain");
+    el.textContent = text;
+  }
+
+  /** Highlight fenced code blocks and attach a header bar (lang + copy). */
+  function enhanceCodeBlocks(scope) {
+    var blocks = scope.querySelectorAll("pre > code");
+    for (var i = 0; i < blocks.length; i++) {
+      (function (code) {
+        if (code.closest(".code-block")) return; // already enhanced
+        var pre = code.parentElement;
+
+        var langMatch = (code.className || "").match(/language-([\w+#-]+)/);
+        var lang = langMatch ? langMatch[1] : "text";
+
+        var wrapper = document.createElement("div");
+        wrapper.className = "code-block";
+
+        var header = document.createElement("div");
+        header.className = "code-header";
+
+        var label = document.createElement("span");
+        label.className = "code-lang";
+        label.textContent = lang;
+
+        var copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "copy-btn";
+        copyBtn.setAttribute("aria-label", "Copy code");
+        copyBtn.innerHTML = ICONS.copy + "<span>Copy</span>";
+        copyBtn.addEventListener("click", function () {
+          var doCopy = navigator.clipboard
+            ? navigator.clipboard.writeText(code.textContent)
+            : Promise.reject();
+          doCopy.then(function () {
+            copyBtn.innerHTML = ICONS.check + "<span>Copied ✓</span>";
+            setTimeout(function () {
+              copyBtn.innerHTML = ICONS.copy + "<span>Copy</span>";
+            }, 1500);
+          }).catch(function () { /* clipboard unavailable — leave as-is */ });
+        });
+
+        header.appendChild(label);
+        header.appendChild(copyBtn);
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(header);
+        wrapper.appendChild(pre);
+
+        if (typeof hljs !== "undefined") {
+          try { hljs.highlightElement(code); } catch (e) {}
+        }
+      })(blocks[i]);
+    }
+  }
+
+  // ── Scrolling ────────────────────────────────────────────────────
+  function nearBottom() {
+    var doc = document.documentElement;
+    return window.innerHeight + window.scrollY >= doc.scrollHeight - 80;
+  }
+  function scrollToBottom(smooth) {
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: smooth && !reducedMotion ? "smooth" : "auto"
+    });
+  }
+  function maybeFollow() {
+    if (following) scrollToBottom(false);
+  }
+  window.addEventListener("scroll", function () {
+    following = nearBottom();
+    jumpBtn.classList.toggle("visible", !following);
+  }, { passive: true });
+
+  jumpBtn.addEventListener("click", function () {
+    following = true;
+    jumpBtn.classList.remove("visible");
+    scrollToBottom(true);
+  });
+
+  // ── Turn construction ────────────────────────────────────────────
+  function hideEmptyState() { emptyEl.hidden = true; }
+  function showEmptyState() { emptyEl.hidden = false; }
+
+  function addUserTurn(text) {
+    var turn = document.createElement("div");
+    turn.className = "turn user";
+    var content = document.createElement("div");
+    content.className = "msg-content plain";
+    content.textContent = text;
+    turn.appendChild(content);
+    messagesEl.appendChild(turn);
+    return turn;
+  }
+
+  /** Create an assistant turn shell: name label + flow container. */
+  function addAssistantTurn() {
+    var turn = document.createElement("div");
+    turn.className = "turn assistant";
+    var name = document.createElement("div");
+    name.className = "assistant-name";
+    name.textContent = "openAssistant";
+    var flow = document.createElement("div");
+    flow.className = "turn-flow";
+    turn.appendChild(name);
+    turn.appendChild(flow);
+    messagesEl.appendChild(turn);
+    return { turn: turn, flow: flow };
+  }
+
+  /** Add a tool step row (<details>): spinner until tool_end resolves it. */
+  function addToolStep(flow, name, summary) {
+    var details = document.createElement("details");
+    details.className = "tool-step";
+
+    var sum = document.createElement("summary");
+    var status = document.createElement("span");
+    status.className = "tool-status";
+    status.innerHTML = ICONS.spinner;
+    var nameEl = document.createElement("span");
+    nameEl.className = "tool-name";
+    nameEl.textContent = name;
+    var sumText = document.createElement("span");
+    sumText.className = "tool-summary";
+    sumText.textContent = summary || "";
+    var chev = document.createElement("span");
+    chev.className = "chev";
+    chev.innerHTML = ICONS.chevron;
+
+    sum.appendChild(status);
+    sum.appendChild(nameEl);
+    sum.appendChild(sumText);
+    sum.appendChild(chev);
+    details.appendChild(sum);
+
+    var body = document.createElement("pre");
+    body.textContent = "Running…";
+    details.appendChild(body);
+
+    flow.appendChild(details);
+    return { details: details, status: status, body: body, name: name, ended: false };
+  }
+
+  /** Resolve a tool step row with its result. */
+  function endToolStep(step, ok, preview) {
+    step.ended = true;
+    step.details.classList.add(ok ? "ok" : "fail");
+    step.status.innerHTML = ok ? ICONS.check : ICONS.x;
+    step.body.textContent = preview || (ok ? "(no output)" : "(failed)");
+    step.details.open = !ok; // collapsed when ok, expanded on failure
+  }
+
+  /** Inline error row with a Retry button. */
+  function addErrorRow(flow, message, retryText) {
+    var row = document.createElement("div");
+    row.className = "error-row";
+    var msg = document.createElement("span");
+    msg.className = "error-msg";
+    msg.textContent = message;
+    row.appendChild(msg);
+    if (retryText) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "retry-btn";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", function () {
+        if (streaming) return;
+        row.remove();
+        startTurn(retryText, /*resend=*/true);
+      });
+      row.appendChild(btn);
+    }
+    flow.appendChild(row);
+    maybeFollow();
+  }
+
+  // ── Streaming turn ───────────────────────────────────────────────
+
+  /**
+   * Live state for the in-flight assistant turn:
+   *   raw          accumulated token text (TOOL markup still embedded)
+   *   textEl       the streaming .msg-content currently receiving tokens
+   *   renderQueued rAF throttle flag
+   */
+  var inflight = null;
+
+  /** Throttled re-render of the in-flight text via requestAnimationFrame. */
+  function scheduleRender() {
+    if (!inflight || inflight.renderQueued) return;
+    inflight.renderQueued = true;
+    requestAnimationFrame(function () {
+      if (!inflight) return;
+      inflight.renderQueued = false;
+      renderInflight();
+    });
+  }
+
+  function renderInflight() {
+    if (!inflight) return;
+    var text = stripToolMarkup(inflight.raw);
+    renderMarkdown(inflight.textEl, text);
+    appendCursor(inflight.textEl);
+    maybeFollow();
+  }
+
+  /** Append the blinking ▍ cursor to the end of the in-flight content. */
+  function appendCursor(contentEl) {
+    var cursor = document.createElement("span");
+    cursor.className = "stream-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    cursor.textContent = "▍";
+    // Tuck the cursor inside the last block element so it sits at the end
+    // of the text instead of on its own line.
+    var last = contentEl.lastElementChild;
+    if (last && !contentEl.classList.contains("plain") &&
+        /^(P|LI|H[1-6]|BLOCKQUOTE)$/.test(last.tagName)) {
+      last.appendChild(cursor);
+    } else {
+      contentEl.appendChild(cursor);
+    }
+  }
+
+  /** Finalize the turn: render full text, highlight code, reset composer. */
+  function finishTurn(finalText) {
+    if (!inflight) return;
+    var t = inflight;
+    inflight = null;
+    var text = stripToolMarkup(finalText != null ? finalText : t.raw).trim();
+    if (text) {
+      renderMarkdown(t.textEl, text);
+      enhanceCodeBlocks(t.textEl);
+    } else {
+      t.textEl.remove(); // tool-only or empty turn: no dangling text block
+    }
+    maybeFollow();
+    setStreaming(false);
+  }
+
+  /** Mark any still-spinning tool rows as interrupted (stop/error paths). */
+  function abandonPendingTools(steps) {
+    for (var i = 0; i < steps.length; i++) {
+      if (!steps[i].ended) endToolStep(steps[i], false, "(interrupted)");
+    }
+  }
+
+  function setStreaming(on) {
+    streaming = on;
+    sendBtn.classList.toggle("streaming", on);
+    sendBtn.setAttribute("aria-label", on ? "Stop generating" : "Send message");
+    updateSendDisabled();
+  }
+
+  function updateSendDisabled() {
+    sendBtn.disabled = !streaming && inputEl.value.trim() === "";
+  }
+
+  /** Dispatch one parsed SSE event onto the in-flight turn. */
+  function handleEvent(ev) {
+    if (!inflight) return;
+    switch (ev.type) {
+      case "token":
+        inflight.raw += ev.text || "";
+        scheduleRender();
+        break;
+
+      case "tool_start": {
+        // Move the streaming text block below the new tool row so the
+        // timeline reads in execution order.
+        var step = addToolStep(inflight.flow, ev.name || "tool", ev.summary || "");
+        inflight.steps.push(step);
+        inflight.flow.appendChild(inflight.textEl);
+        maybeFollow();
+        break;
+      }
+
+      case "tool_end": {
+        // Match the most recent unfinished row with this name (fall back
+        // to the most recent unfinished row of any name).
+        var match = null;
+        for (var i = inflight.steps.length - 1; i >= 0; i--) {
+          var s = inflight.steps[i];
+          if (s.ended) continue;
+          if (s.name === ev.name) { match = s; break; }
+          if (!match) match = s;
+        }
+        if (match) endToolStep(match, !!ev.ok, ev.preview || "");
+        maybeFollow();
+        break;
+      }
+
+      case "done": {
+        var steps = inflight.steps;
+        finishTurn(ev.text || "");
+        abandonPendingTools(steps);
+        break;
+      }
+
+      case "error": {
+        var t = inflight;
+        finishTurn(null); // keep whatever text streamed so far
+        abandonPendingTools(t.steps);
+        addErrorRow(t.flow, ev.message || "Something went wrong.", lastUserText);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Run one chat turn: POST the message, then read the SSE body with a
+   * streaming reader (EventSource can't POST). `resend` skips re-adding
+   * the user bubble (Retry re-sends the message already on screen).
+   */
+  function startTurn(text, resend) {
+    hideEmptyState();
+    lastUserText = text;
+    if (!resend) addUserTurn(text);
+
+    var shell = addAssistantTurn();
+    var textEl = document.createElement("div");
+    textEl.className = "msg-content";
+    appendCursor(textEl);
+    shell.flow.appendChild(textEl);
+
+    inflight = { flow: shell.flow, textEl: textEl, raw: "", renderQueued: false, steps: [] };
+    controller = new AbortController();
+    setStreaming(true);
+    following = true;
+    scrollToBottom(false);
+
+    fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: text }),
+      signal: controller.signal
+    }).then(function (res) {
+      if (!res.ok || !res.body) {
+        throw new Error("Server returned " + (res.status || "no response"));
+      }
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+
+      function handleLine(line) {
+        line = line.replace(/\r$/, "");
+        if (line.indexOf("data:") !== 0) return; // ignore comments/blank lines
+        var payload = line.slice(5).trim();
+        if (!payload) return;
+        var ev;
+        try { ev = JSON.parse(payload); } catch (e) { return; }
+        handleEvent(ev);
+      }
+
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            buffer += decoder.decode(); // flush the decoder
+            if (buffer) handleLine(buffer);
+            // Stream ended without a `done` event (server closed early):
+            // finalize with whatever streamed.
+            if (inflight) {
+              var steps = inflight.steps;
+              finishTurn(null);
+              abandonPendingTools(steps);
+            }
+            return;
+          }
+          buffer += decoder.decode(chunk.value, { stream: true });
+          var idx;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            handleLine(buffer.slice(0, idx));
+            buffer = buffer.slice(idx + 1);
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (err) {
+      if (!inflight) return; // already finished (done/error event or stop)
+      var t = inflight;
+      var aborted = err && err.name === "AbortError";
+      finishTurn(null);
+      abandonPendingTools(t.steps);
+      if (!aborted) {
+        addErrorRow(t.flow, "Connection failed: " + (err && err.message ? err.message : err), text);
+      }
+    });
+  }
+
+  /** Stop button: abort the in-flight fetch and finalize with partial text. */
+  function stopTurn() {
+    if (controller) controller.abort();
+    if (inflight) {
+      var steps = inflight.steps;
+      finishTurn(null);
+      abandonPendingTools(steps);
+    }
+  }
+
+  // ── Composer ─────────────────────────────────────────────────────
+  function autoGrow() {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 173) + "px";
+  }
+
+  function submit() {
+    if (streaming) { stopTurn(); return; }
+    var text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = "";
+    autoGrow();
+    updateSendDisabled();
+    startTurn(text, false);
+  }
+
+  inputEl.addEventListener("input", function () { autoGrow(); updateSendDisabled(); });
+  inputEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  });
+  sendBtn.addEventListener("click", submit);
+
+  // Starter-prompt chips fill + send
+  var chips = document.querySelectorAll(".chip");
+  for (var c = 0; c < chips.length; c++) {
+    chips[c].addEventListener("click", function () {
+      if (streaming) return;
+      startTurn(this.textContent.trim(), false);
+    });
+  }
+
+  // ── History hydration ────────────────────────────────────────────
+  function renderHistory(history) {
+    if (!history || !history.length) { showEmptyState(); return; }
+    hideEmptyState();
+    for (var i = 0; i < history.length; i++) {
+      var m = history[i];
+      if (m.role === "user") {
+        addUserTurn(m.content || "");
+        lastUserText = m.content || "";
+      } else {
+        var shell = addAssistantTurn();
+        var content = document.createElement("div");
+        content.className = "msg-content";
+        renderMarkdown(content, stripToolMarkup(m.content || ""));
+        enhanceCodeBlocks(content);
+        shell.flow.appendChild(content);
+      }
+    }
+    scrollToBottom(false);
+  }
+
+  fetch("/api/messages")
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(renderHistory)
+    .catch(function () { showEmptyState(); });
+
+  updateSendDisabled();
+  inputEl.focus();
+
+})();
+</script>
 </body>
 </html>
