@@ -582,33 +582,56 @@ impl Agent {
         Ok(store.format())
     }
 
+    /// Restrict the default tool set to an allowlist (sub-agent tool scoping).
+    fn filtered_tools(allowed: &[String]) -> Vec<ToolDefinition> {
+        let mut tools: Vec<ToolDefinition> = Self::default_tools()
+            .into_iter()
+            .filter(|t| allowed.iter().any(|a| a == &t.name))
+            .collect();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
+    }
+
     async fn handle_task_tool(&self, args: &serde_json::Value) -> Result<String> {
+        if self.depth >= 1 {
+            return Ok("Sub-agent refused: nested sub-agents are not allowed (depth limit 1).".to_string());
+        }
         let subagent_type = args["subagent_type"].as_str().unwrap_or("General");
         let description = args["description"].as_str().unwrap_or("");
         let prompt = args["prompt"].as_str().unwrap_or("");
+        if prompt.is_empty() {
+            return Ok("task: missing 'prompt' argument.".to_string());
+        }
 
-        let tools = args["tools"].as_array()
+        let tools: Vec<String> = args["tools"].as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
             .unwrap_or_else(|| vec!["read".to_string(), "glob".to_string(), "grep".to_string()]);
 
         let role_desc = match subagent_type {
-            "Explore" => "fast agent specialized for exploring codebases. Use for finding files, searching code, and understanding project structure.",
-            "Plan" => "agent specialized for planning and design. Use for creating implementation plans, designing architectures, and breaking down complex tasks.",
-            _ => "general-purpose agent for complex tasks. Use for multi-step work that requires reasoning and tool use.",
+            "Explore" => "fast agent specialized for exploring codebases: finding files, searching code, understanding project structure",
+            "Plan" => "agent specialized for planning and design: implementation plans, architectures, breaking down complex tasks",
+            _ => "general-purpose agent for multi-step work that requires reasoning and tool use",
         };
 
-        Ok(format!(
-            "🤖 Sub-Agent Task Spawned\n\
-            Type: {} ({})\n\
-            Description: {}\n\
-            Tools: {}\n\
-            \n\
-            Prompt:\n{}\n\
-            \n\
-            In a full implementation, this would spawn an isolated agent process\n\
-            with its own context, tool set, and conversation history.",
-            subagent_type, role_desc, description, tools.join(", "), prompt
-        ))
+        let mut child = Agent::new(self.model.clone())
+            .with_workspace(self.workspace_dir.clone())
+            .with_permission_mode(self.permission_mode);
+        child.depth = self.depth + 1;
+        child.tools = Self::filtered_tools(&tools);
+
+        let mut child_ctx = super::persona::FullContext::new();
+        let mut child_session = super::session::Session::new("subagent", "local");
+        let task_prompt = format!(
+            "You are a {role_desc}. Complete this task and report your findings as your final message.\n\
+             Task: {description}\n\n{prompt}"
+        );
+
+        // Box the recursive async call (process → execute_tool → here).
+        let result = Box::pin(child.process(&task_prompt, &mut child_ctx, &mut child_session)).await;
+        match result {
+            Ok(text) => Ok(format!("🤖 Sub-agent ({}) result:\n{}", subagent_type, text)),
+            Err(e) => Ok(format!("Sub-agent ({}) failed: {}", subagent_type, e)),
+        }
     }
 
     async fn handle_plan_mode(&self, args: &serde_json::Value) -> Result<String> {
@@ -979,6 +1002,24 @@ mod tests {
         assert!(err.contains("approval"), "headless Ask must explain itself: {}", err);
         let read = ToolCall { name: "read".into(), arguments: serde_json::json!({}) };
         assert!(agent.check_permission(&rules, &read).is_ok());
+    }
+
+    #[test]
+    fn filtered_tools_keeps_only_requested() {
+        let names: Vec<String> = Agent::filtered_tools(&["read".into(), "grep".into(), "nonexistent".into()])
+            .iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["grep".to_string(), "read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn task_tool_refuses_nested_spawn() {
+        let mut agent = Agent::new("m");
+        agent.depth = 1;
+        let out = agent
+            .handle_task_tool(&serde_json::json!({"subagent_type": "Explore", "prompt": "x"}))
+            .await
+            .unwrap();
+        assert!(out.contains("depth"), "must refuse with a depth explanation: {}", out);
     }
 
     #[test]
