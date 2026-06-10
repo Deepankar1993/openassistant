@@ -79,10 +79,11 @@ impl PermissionMode {
         // In AcceptEdits mode, reads + file edits + common fs commands are auto-allowed
         match tool {
             "read" | "glob" | "grep" | "write" | "edit" | "multi_edit" | "apply_patch" | "ls" | "context" | "cost" | "status" | "todos" | "search" => PermissionAction::Allow,
-            "bash" => {
-                // Auto-approve common safe commands
-                PermissionAction::Allow
-            }
+            // NOTE: blanket-allows shell commands — in this mode, command-level
+            // restriction comes from config deny rules (checked before the
+            // mode, so they fire even here). Use Default mode to refuse shell
+            // outright on headless channels.
+            "bash" | "shell" => PermissionAction::Allow,
             _ => PermissionAction::Ask(format!("Allow tool '{}' to run?", tool)),
         }
     }
@@ -95,7 +96,7 @@ impl PermissionMode {
             // Allow writes in project directory
             "write" | "edit" | "multi_edit" | "apply_patch" => PermissionAction::Allow,
             // Bash: allow common dev commands, ask for dangerous ones
-            "bash" => PermissionAction::Allow, // Simplified — real classifier is more nuanced
+            "bash" | "shell" => PermissionAction::Allow, // Simplified — real classifier is more nuanced
             // Network: allow
             "web_search" | "web_fetch" => PermissionAction::Allow,
             // Default: ask

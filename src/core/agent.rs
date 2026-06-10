@@ -95,6 +95,12 @@ impl Agent {
                 let cmd = tool_call.arguments["command"].as_str().unwrap_or("");
                 format!("Bash({})", cmd)
             }
+            // self_manage's run_command action embeds a shell command and must
+            // be gated like bash so Bash(...) deny rules apply to it.
+            "self_manage" if tool_call.arguments["action"].as_str() == Some("run_command") => {
+                let cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                format!("Bash({})", cmd)
+            }
             _ => tool_call.name.clone(),
         }
     }
@@ -109,11 +115,22 @@ impl Agent {
         tool_call: &ToolCall,
     ) -> Result<(), String> {
         use super::permissions::PermissionAction;
+        // Rules are checked against the permission key (Bash(<command>) for
+        // shell tools) AND the raw tool name, so both `Bash(git *)` and plain
+        // `shell`/`bash` rules work as users expect.
         let key = Self::permission_key(tool_call);
-        let action = match rules.check_explicit(&key) {
-            Some(a) => a,
-            None => self.permission_mode.check_action(&tool_call.name, &tool_call.arguments),
-        };
+        let action = rules
+            .check_explicit(&key)
+            .or_else(|| {
+                if key != tool_call.name {
+                    rules.check_explicit(&tool_call.name)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                self.permission_mode.check_action(&tool_call.name, &tool_call.arguments)
+            });
         match action {
             PermissionAction::Allow => Ok(()),
             PermissionAction::Deny(msg) => Err(format!("⛔ {} — the call was blocked.", msg)),
@@ -981,6 +998,25 @@ mod tests {
         assert_eq!(Agent::permission_key(&call), "Bash(ls)");
         let call = ToolCall { name: "read".into(), arguments: serde_json::json!({"path": "x"}) };
         assert_eq!(Agent::permission_key(&call), "read");
+        // self_manage's run_command action embeds a shell command — it must be
+        // gated like bash, not like a benign self_manage call.
+        let call = ToolCall {
+            name: "self_manage".into(),
+            arguments: serde_json::json!({"action": "run_command", "command": "rm -rf /"}),
+        };
+        assert_eq!(Agent::permission_key(&call), "Bash(rm -rf /)");
+        let call = ToolCall { name: "self_manage".into(), arguments: serde_json::json!({"action": "list_skills"}) };
+        assert_eq!(Agent::permission_key(&call), "self_manage");
+    }
+
+    #[test]
+    fn deny_rule_on_raw_tool_name_blocks_shell_tools() {
+        // A user writing deny: ["shell"] expects the shell tool blocked even
+        // though its permission key is Bash(<command>).
+        let rules = PermissionRules { allow: vec![], ask: vec![], deny: vec!["shell".into()] };
+        let call = ToolCall { name: "shell".into(), arguments: serde_json::json!({"command": "ls"}) };
+        let agent = Agent::new("m");
+        assert!(agent.check_permission(&rules, &call).is_err());
     }
 
     #[test]
