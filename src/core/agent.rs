@@ -31,6 +31,11 @@ pub struct Agent {
     pub depth: u8,
 }
 
+/// Max LLM⇄tool rounds per user turn.
+const MAX_TOOL_ITERATIONS: usize = 6;
+/// Max bytes of a single tool output fed back to the model.
+const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -145,17 +150,52 @@ impl Agent {
         // Build conversation messages
         let messages = self.build_messages(&system_prompt, session);
 
-        // Call the LLM
-        let response = self.call_llm(&messages).await?;
+        // Call the LLM, then loop: execute the requested tool, feed the result
+        // back, and let the model continue until it answers without a tool
+        // call (or the iteration cap is hit). Skipped when tool dispatch is
+        // disabled.
+        let mut messages = messages;
+        let mut response = self.call_llm(&messages).await?;
 
-        // Handle tool calls (skipped when tool dispatch is disabled)
         let final_response = if self.tools_enabled {
-            if let Some(tool_call) = self.parse_tool_call(&response) {
-                let out = self.execute_tool(&tool_call, ctx, session, &mem).await?;
-                format!("{}\n\n{}", response, out)
-            } else {
-                response
+            let config = crate::config::load().await?;
+            let rules = super::permissions::PermissionRules {
+                allow: config.permissions.allow.clone(),
+                ask: config.permissions.ask.clone(),
+                deny: config.permissions.deny.clone(),
+            };
+            let mut iterations = 0;
+            while let Some(tool_call) = self.parse_tool_call(&response) {
+                if iterations >= MAX_TOOL_ITERATIONS {
+                    response.push_str("\n\n[Stopped: tool iteration limit reached for this turn.]");
+                    break;
+                }
+                iterations += 1;
+                debug!("Tool round {}: {}", iterations, tool_call.name);
+
+                let output = match self.check_permission(&rules, &tool_call) {
+                    Ok(()) => match self.execute_tool(&tool_call, ctx, session, &mem).await {
+                        Ok(out) => out,
+                        // Execution errors go back to the model as text so it
+                        // can recover; only transport/config errors from
+                        // call_llm abort the turn.
+                        Err(e) => format!("Tool '{}' failed: {}", tool_call.name, e),
+                    },
+                    Err(denial) => denial,
+                };
+                let output = truncate_output(&output, MAX_TOOL_OUTPUT_BYTES);
+
+                // Record the trajectory in both the working message list and
+                // the session, so later turns keep the tool context.
+                let result_msg = format!("[TOOL RESULT: {}]\n{}", tool_call.name, output);
+                session.add_message(Message::assistant(&response));
+                session.add_message(Message::user(&result_msg));
+                messages.push(serde_json::json!({"role": "assistant", "content": response}));
+                messages.push(serde_json::json!({"role": "user", "content": result_msg}));
+
+                response = self.call_llm(&messages).await?;
             }
+            response
         } else {
             response
         };
@@ -191,6 +231,7 @@ impl Agent {
                 prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
             }
             prompt.push('\n');
+            push_str(&mut prompt, "After you emit a tool call, STOP — the tool result will be sent back to you as a [TOOL RESULT: name] message, and you can then continue or emit the next tool call. One tool call per message.");
 
             // Self-management instructions
             push_str(&mut prompt, "# Self-Management");
