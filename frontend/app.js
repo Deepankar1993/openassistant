@@ -289,44 +289,365 @@
   });
 
   // ── Rendering ─────────────────────────────────────
+  // Persona identity shown on assistant turns and the empty state.
+  let personaName = "openAssistant";
+  const PERSONA_TAGLINE = "Your local, private AI companion.";
+  const STARTER_PROMPTS = [
+    "Summarize what you remember about me",
+    "Help me plan my day",
+    "What can you do?",
+  ];
+
+  function updatePersonaLabels() {
+    $$(".msg-author:not(.error-label)").forEach((el) => { el.textContent = personaName; });
+    const en = messageList.querySelector(".empty-name");
+    if (en) en.textContent = personaName;
+  }
+
   function emptyState() {
     const d = document.createElement("div");
     d.className = "empty-state";
-    d.innerHTML = '<div class="big">🦉</div><div>Ask me anything to get started.</div>';
+    const name = document.createElement("div");
+    name.className = "empty-name";
+    name.textContent = personaName;
+    const tag = document.createElement("div");
+    tag.className = "empty-tagline";
+    tag.textContent = PERSONA_TAGLINE;
+    const chips = document.createElement("div");
+    chips.className = "starter-chips";
+    STARTER_PROMPTS.forEach((prompt) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "starter-chip";
+      chip.textContent = prompt;
+      chip.addEventListener("click", () => {
+        if (chatInput.disabled) return;
+        chatInput.value = prompt;
+        autoGrow();
+        send();
+      });
+      chips.appendChild(chip);
+    });
+    d.appendChild(name);
+    d.appendChild(tag);
+    d.appendChild(chips);
     return d;
   }
+
+  function authorLabel(text, isError) {
+    const el = document.createElement("div");
+    el.className = "msg-author" + (isError ? " error-label" : "");
+    el.textContent = text;
+    return el;
+  }
+
   function renderMessage(msg) {
-    const wrap = document.createElement("div");
     const role = msg.role === "user" ? "user" : msg.role === "error" ? "error" : "assistant";
+    const wrap = document.createElement("div");
     wrap.className = "msg " + role;
     wrap.dataset.testid = "message-" + role;
-    const avatar = role === "user" ? "🧑" : role === "error" ? "⚠️" : "🦉";
-    wrap.innerHTML = `<div class="avatar">${avatar}</div><div class="bubble" data-testid="message-bubble"></div>`;
-    wrap.querySelector(".bubble").textContent = msg.content;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.dataset.testid = "message-bubble";
+    if (role === "assistant") {
+      wrap.appendChild(authorLabel(personaName, false));
+      if (window.OAMarkdown) {
+        OAMarkdown.render(bubble, msg.content);
+        OAMarkdown.enhance(bubble);
+      } else {
+        bubble.textContent = msg.content;
+      }
+    } else if (role === "error") {
+      wrap.appendChild(authorLabel("Error", true));
+      bubble.textContent = msg.content;
+    } else {
+      bubble.textContent = msg.content;
+    }
+    wrap.appendChild(bubble);
     return wrap;
   }
+
+  // Auto-scroll: follow the bottom unless the user has scrolled up; a
+  // "jump to bottom" pill resumes following.
+  let followBottom = true;
+  const jumpBtn = $("#jump-bottom");
+  function scrollToBottom(force) {
+    if (force) followBottom = true;
+    if (followBottom) {
+      messageList.scrollTop = messageList.scrollHeight;
+      if (jumpBtn) jumpBtn.classList.add("hidden");
+    }
+  }
+  messageList.addEventListener("scroll", () => {
+    const nearBottom =
+      messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 48;
+    followBottom = nearBottom;
+    if (jumpBtn) jumpBtn.classList.toggle("hidden", nearBottom);
+  });
+  if (jumpBtn) jumpBtn.addEventListener("click", () => scrollToBottom(true));
+
   function appendMessage(msg) {
     const es = messageList.querySelector(".empty-state");
     if (es) es.remove();
     messageList.appendChild(renderMessage(msg));
-    messageList.scrollTop = messageList.scrollHeight;
+    scrollToBottom(true);
   }
   function showTyping() {
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
     wrap.id = "typing-indicator";
     wrap.dataset.testid = "typing-indicator";
-    wrap.innerHTML = '<div class="avatar">🦉</div><div class="bubble"><span class="dots"><span></span><span></span><span></span></span></div>';
+    wrap.appendChild(authorLabel(personaName, false));
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>'; // static markup
+    wrap.appendChild(bubble);
     messageList.appendChild(wrap);
-    messageList.scrollTop = messageList.scrollHeight;
+    scrollToBottom(true);
   }
   function hideTyping() { const t = $("#typing-indicator"); if (t) t.remove(); }
+
+  // Open links from rendered markdown externally instead of navigating the webview.
+  messageList.addEventListener("click", async (e) => {
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (!a || !messageList.contains(a)) return;
+    e.preventDefault();
+    try { await backend("open_external_url", { url: a.href }); } catch (_) {}
+  });
+
+  // ── Streaming chat (Tauri only) ───────────────────
+  // When running inside Tauri with the event API available, chat goes through
+  // `send_message_stream` and live `chat-event` window events. In a plain
+  // browser (mock/Playwright pathway) the classic `send_message` flow is used.
+  const streamingSupported = !!(
+    realInvoke && tauri.event && typeof tauri.event.listen === "function"
+  );
+
+  let streamSeq = 0;       // generation counter for in-flight streams
+  let activeSendId = 0;    // which send currently owns the composer
+  let stream = null;       // active stream context, or null
+
+  function errText(err) {
+    return typeof err === "string" ? err : (err && err.message) || "Request failed.";
+  }
+
+  function setComposerStreaming(on) {
+    sendBtn.classList.toggle("stop", on);
+    sendBtn.textContent = on ? "Stop" : "Send";
+    sendBtn.setAttribute("aria-label", on ? "Stop" : "Send");
+    if (on) sendBtn.disabled = false;
+  }
+
+  function createStreamContext(id) {
+    const es = messageList.querySelector(".empty-state");
+    if (es) es.remove();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant streaming";
+    wrap.dataset.testid = "message-assistant";
+    wrap.appendChild(authorLabel(personaName, false));
+    const body = document.createElement("div");
+    body.className = "bubble";
+    body.dataset.testid = "message-bubble";
+    const cursor = document.createElement("span");
+    cursor.className = "stream-cursor";
+    cursor.textContent = "▍";
+    body.appendChild(cursor);
+    wrap.appendChild(body);
+    messageList.appendChild(wrap);
+    const ctx = {
+      id, wrap, body, cursor,
+      segEl: null, segText: "",
+      steps: [], raf: 0,
+      stopped: false, finalized: false,
+    };
+    newStreamSegment(ctx);
+    scrollToBottom(true);
+    return ctx;
+  }
+
+  function newStreamSegment(ctx) {
+    const seg = document.createElement("div");
+    seg.className = "stream-text";
+    ctx.body.insertBefore(seg, ctx.cursor);
+    ctx.segEl = seg;
+    ctx.segText = "";
+  }
+
+  function renderStreamSegment(ctx) {
+    if (window.OAMarkdown) OAMarkdown.render(ctx.segEl, ctx.segText);
+    else ctx.segEl.textContent = ctx.segText;
+  }
+
+  // rAF-throttled re-render of the active text segment while tokens stream.
+  function scheduleStreamRender() {
+    if (!stream || stream.raf) return;
+    stream.raf = requestAnimationFrame(() => {
+      if (!stream) return;
+      stream.raf = 0;
+      renderStreamSegment(stream);
+      scrollToBottom(false);
+    });
+  }
+
+  function addToolStep(p) {
+    const ctx = stream;
+    renderStreamSegment(ctx); // flush text accumulated before the tool ran
+    const det = document.createElement("details");
+    det.className = "tool-step running";
+    det.dataset.testid = "tool-step";
+    det.open = false;
+    const sum = document.createElement("summary");
+    const icon = document.createElement("span");
+    icon.className = "tool-step-icon";
+    icon.innerHTML = window.OAIcons ? OAIcons.spinner : ""; // static markup
+    const nm = document.createElement("span");
+    nm.className = "tool-step-name";
+    nm.textContent = p.name || "tool";
+    const sm = document.createElement("span");
+    sm.className = "tool-step-detail";
+    sm.textContent = p.summary || "";
+    sum.appendChild(icon);
+    sum.appendChild(nm);
+    sum.appendChild(sm);
+    det.appendChild(sum);
+    const preview = document.createElement("pre");
+    preview.className = "tool-step-preview";
+    det.appendChild(preview);
+    ctx.body.insertBefore(det, ctx.cursor);
+    ctx.steps.push(det);
+    newStreamSegment(ctx); // text after the tool goes into a fresh segment
+    scrollToBottom(false);
+  }
+
+  function endToolStep(p) {
+    const ctx = stream;
+    const det =
+      ctx.steps.slice().reverse().find(
+        (d) =>
+          d.classList.contains("running") &&
+          (!p.name || d.querySelector(".tool-step-name").textContent === p.name)
+      ) || ctx.steps.slice().reverse().find((d) => d.classList.contains("running"));
+    if (!det) return;
+    det.classList.remove("running");
+    det.classList.add(p.ok ? "ok" : "fail");
+    const icon = det.querySelector(".tool-step-icon");
+    if (icon) icon.innerHTML = window.OAIcons ? (p.ok ? OAIcons.check : OAIcons.cross) : ""; // static markup
+    const preview = det.querySelector(".tool-step-preview");
+    if (preview) preview.textContent = p.preview || "";
+    det.open = !p.ok; // collapsed when ok, open when not
+    scrollToBottom(false);
+  }
+
+  // Finalize the in-flight message. When finalText is a string, it replaces
+  // all streamed text segments (tool step rows are kept); otherwise the
+  // buffered text is kept as-is.
+  function finalizeStream(finalText) {
+    const s = stream;
+    if (!s || s.finalized) return;
+    s.finalized = true;
+    if (s.raf) { cancelAnimationFrame(s.raf); s.raf = 0; }
+    s.cursor.remove();
+    if (typeof finalText === "string" && finalText.length) {
+      s.body.querySelectorAll(".stream-text").forEach((n) => n.remove());
+      const el = document.createElement("div");
+      el.className = "stream-text";
+      if (window.OAMarkdown) OAMarkdown.render(el, finalText);
+      else el.textContent = finalText;
+      s.body.appendChild(el);
+    } else {
+      renderStreamSegment(s);
+    }
+    // Any step still marked running was interrupted.
+    s.steps.forEach((d) => {
+      if (d.classList.contains("running")) {
+        d.classList.remove("running");
+        d.classList.add("fail");
+        const icon = d.querySelector(".tool-step-icon");
+        if (icon) icon.innerHTML = window.OAIcons ? OAIcons.cross : ""; // static markup
+      }
+    });
+    if (window.OAMarkdown) OAMarkdown.enhance(s.body);
+    s.wrap.classList.remove("streaming");
+    stream = null;
+    scrollToBottom(false);
+  }
+
+  function resetComposerAfterStream() {
+    activeSendId = 0;
+    sending = false;
+    setComposerStreaming(false);
+    chatInput.focus();
+    refreshStatus();
+  }
+
+  // Stop button: stop APPLYING events client-side and finalize the message.
+  // (No backend cancel is available; late events/results are ignored.)
+  function stopStream() {
+    if (!stream) return;
+    stream.stopped = true;
+    finalizeStream(null);
+    resetComposerAfterStream();
+  }
+
+  function handleChatEvent(p) {
+    if (!p || !stream || stream.stopped || stream.finalized) return;
+    switch (p.type) {
+      case "token":
+        stream.segText += p.text || "";
+        scheduleStreamRender();
+        break;
+      case "tool_start":
+        addToolStep(p);
+        break;
+      case "tool_end":
+        endToolStep(p);
+        break;
+      case "done":
+        finalizeStream(typeof p.text === "string" ? p.text : null);
+        resetComposerAfterStream();
+        break;
+      case "error":
+        finalizeStream(null);
+        appendMessage({ role: "error", content: p.message || "Stream error." });
+        resetComposerAfterStream();
+        break;
+    }
+  }
+
+  if (streamingSupported) {
+    tauri.event.listen("chat-event", (evt) => handleChatEvent(evt && evt.payload));
+  }
+
+  async function sendStreaming(text) {
+    const id = ++streamSeq;
+    activeSendId = id;
+    sending = true;
+    setComposerStreaming(true);
+    chatInput.value = "";
+    autoGrow();
+    appendMessage({ role: "user", content: text });
+    stream = createStreamContext(id);
+    try {
+      const reply = await backend("send_message_stream", { message: text });
+      if (stream && stream.id === id && !stream.finalized) {
+        finalizeStream(reply && typeof reply.content === "string" ? reply.content : null);
+      }
+    } catch (err) {
+      if (activeSendId === id) {
+        if (stream && stream.id === id) finalizeStream(null);
+        appendMessage({ role: "error", content: errText(err) });
+      }
+    } finally {
+      if (activeSendId === id) resetComposerAfterStream();
+    }
+  }
 
   // ── Chat send flow ────────────────────────────────
   let sending = false;
   async function send() {
     const text = chatInput.value.trim();
     if (!text || sending) return;
+    if (streamingSupported) { sendStreaming(text); return; }
     sending = true;
     sendBtn.disabled = true;
     chatInput.value = "";
@@ -339,7 +660,7 @@
       appendMessage(reply);
     } catch (err) {
       hideTyping();
-      appendMessage({ role: "error", content: typeof err === "string" ? err : (err && err.message) || "Request failed." });
+      appendMessage({ role: "error", content: errText(err) });
     } finally {
       sending = false;
       sendBtn.disabled = false;
@@ -347,7 +668,10 @@
       refreshStatus();
     }
   }
-  sendBtn.addEventListener("click", send);
+  sendBtn.addEventListener("click", () => {
+    if (sendBtn.classList.contains("stop")) { stopStream(); return; }
+    send();
+  });
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
@@ -376,7 +700,9 @@
         : "No API key configured";
       const banner = $("#apikey-banner");
       banner.classList.toggle("hidden", !!s.api_key_set);
-      sendBtn.disabled = !s.api_key_set || sending;
+      // While streaming, the button is a Stop button and must stay clickable.
+      const isStop = sendBtn.classList.contains("stop");
+      sendBtn.disabled = !isStop && (!s.api_key_set || sending);
       chatInput.disabled = !s.api_key_set;
     } catch (err) {
       $("#conn-dot").className = "dot err";
@@ -777,12 +1103,14 @@
       container.innerHTML = "";
       rows.forEach(r => {
         const cls = r.ok ? "ok" : r.required ? "fail" : "warn";
-        const icon = r.ok ? "✅" : r.required ? "❌" : "⚠️";
         const row = document.createElement("div");
         row.className = "doctor-row " + cls;
         const iconEl = document.createElement("span");
         iconEl.className = "doctor-icon";
-        iconEl.textContent = icon;
+        // static SVG markup from OAIcons
+        iconEl.innerHTML = window.OAIcons
+          ? (r.ok ? OAIcons.check : r.required ? OAIcons.cross : OAIcons.warn)
+          : "";
         const nameEl = document.createElement("span");
         nameEl.className = "doctor-name";
         nameEl.textContent = r.name;
@@ -935,6 +1263,28 @@
     }
   }
 
+  // Memory viewer mode: "edit" shows the raw textarea, "preview" shows
+  // sanitized rendered markdown. Read-only files default to preview.
+  let memoryMode = "edit";
+  function setMemoryMode(mode) {
+    memoryMode = mode;
+    const ta = $("#memory-content");
+    const rendered = $("#memory-rendered");
+    const btn = $("#memory-mode-btn");
+    const preview = mode === "preview";
+    if (preview && rendered && window.OAMarkdown) {
+      OAMarkdown.render(rendered, ta.value);
+      OAMarkdown.enhance(rendered);
+    }
+    if (rendered) rendered.classList.toggle("hidden", !preview);
+    ta.classList.toggle("hidden", preview);
+    if (btn) btn.textContent = preview ? (memoryIsEditable ? "Edit" : "Source") : "Preview";
+  }
+  const memoryModeBtn = $("#memory-mode-btn");
+  if (memoryModeBtn) memoryModeBtn.addEventListener("click", () => {
+    setMemoryMode(memoryMode === "preview" ? "edit" : "preview");
+  });
+
   function showMemoryContent(filename, content, editable) {
     const ta = $("#memory-content");
     const toolbar = $("#memory-toolbar");
@@ -942,11 +1292,11 @@
     const saveBtn = $("#memory-save-btn");
     ta.value = content;
     ta.readOnly = !editable;
-    ta.style.background = editable ? "var(--bg-primary)" : "var(--bg-secondary)";
-    ta.style.color = editable ? "var(--text-primary)" : "var(--text-secondary)";
     label.textContent = filename;
     toolbar.classList.remove("hidden");
     saveBtn.classList.toggle("hidden", !editable);
+    // Editable files open in edit mode; read-only notes open rendered.
+    setMemoryMode(editable || !window.OAMarkdown || !OAMarkdown.available() ? "edit" : "preview");
   }
 
   $("#memory-save-btn").addEventListener("click", async () => {
@@ -1158,12 +1508,14 @@
       results.innerHTML = "";
       rows.forEach(r => {
         const cls = r.ok ? "ok" : r.is_optional ? "warn" : "fail";
-        const icon = r.ok ? "✅" : r.is_optional ? "⚠️" : "❌";
         const row = document.createElement("div");
         row.className = "doctor-row " + cls;
         const iconEl = document.createElement("span");
         iconEl.className = "doctor-icon";
-        iconEl.textContent = icon;
+        // static SVG markup from OAIcons
+        iconEl.innerHTML = window.OAIcons
+          ? (r.ok ? OAIcons.check : r.is_optional ? OAIcons.warn : OAIcons.cross)
+          : "";
         const nameEl = document.createElement("span");
         nameEl.className = "doctor-name";
         nameEl.textContent = r.name;
@@ -1268,10 +1620,13 @@
       const ok = await backend("check_path_writable", { path });
       wiz.writableChecked = !!ok;
       badge.className = "writable-badge " + (ok ? "ok" : "fail");
-      badge.textContent = ok ? "✓ Writable" : "✗ Cannot write — choose another folder";
+      // static SVG + static copy
+      badge.innerHTML = ok
+        ? (window.OAIcons ? OAIcons.check : "") + "<span>Writable</span>"
+        : (window.OAIcons ? OAIcons.cross : "") + "<span>Cannot write — choose another folder</span>";
     } catch (_) {
       badge.className = "writable-badge fail";
-      badge.textContent = "✗ Check failed";
+      badge.innerHTML = (window.OAIcons ? OAIcons.cross : "") + "<span>Check failed</span>"; // static markup
     }
     wizUpdateContinue();
   }
@@ -1405,42 +1760,46 @@
   });
 
   // Screen 4 – Pills
+  // Sets a pill's state + label using static SVG icons from OAIcons.
+  function setPill(pill, state, label) {
+    pill.className = "status-pill " + state;
+    const icons = window.OAIcons || {};
+    const icon =
+      state === "ok" ? icons.check :
+      state === "warn" ? icons.warn :
+      state === "fail" ? icons.cross : icons.clock;
+    pill.innerHTML = '<span class="pill-icon">' + (icon || "") + "</span> "; // static markup
+    pill.appendChild(document.createTextNode(label));
+  }
+
   async function wizRunScreen4Pills() {
     // Pill 1: Config saved — verify api_key_set from get_app_state
     const pillConfig = $("#onboard-pill-config");
     const pillDatadir = $("#onboard-pill-datadir");
     const pillVision = $("#onboard-pill-vision");
 
-    pillConfig.className = "status-pill pending";
-    pillConfig.innerHTML = '<span class="pill-icon">⏳</span> Config saved';
-    pillDatadir.className = "status-pill pending";
-    pillDatadir.innerHTML = '<span class="pill-icon">⏳</span> Data directory ready';
-    pillVision.className = "status-pill pending";
-    pillVision.innerHTML = '<span class="pill-icon">⏳</span> Vision tools';
+    setPill(pillConfig, "pending", "Config saved");
+    setPill(pillDatadir, "pending", "Data directory ready");
+    setPill(pillVision, "pending", "Vision tools");
 
     // Pill 1: verify connection test passed (config is not yet saved at this point)
     if (wiz.connTested && wiz.apiKey) {
-      pillConfig.className = "status-pill ok";
-      pillConfig.innerHTML = '<span class="pill-icon">✓</span> Config ready';
+      setPill(pillConfig, "ok", "Config ready");
     } else {
-      pillConfig.className = "status-pill warn";
-      pillConfig.innerHTML = '<span class="pill-icon">⚠️</span> Config pending';
+      setPill(pillConfig, "warn", "Config pending");
     }
 
     // Pill 2: data dir was validated in screen 1
     if (wiz.writableChecked) {
-      pillDatadir.className = "status-pill ok";
-      pillDatadir.innerHTML = '<span class="pill-icon">✓</span> Data directory ready';
+      setPill(pillDatadir, "ok", "Data directory ready");
     } else {
-      pillDatadir.className = "status-pill warn";
-      pillDatadir.innerHTML = '<span class="pill-icon">⚠️</span> Data directory not verified';
+      setPill(pillDatadir, "warn", "Data directory not verified");
     }
 
     // Pill 3: run_doctor filtered to vision — 200ms before showing amber
     const visionTimer = setTimeout(() => {
       if (pillVision.className.includes("pending")) {
-        pillVision.className = "status-pill warn";
-        pillVision.innerHTML = '<span class="pill-icon">⏳</span> Checking…';
+        setPill(pillVision, "warn", "Checking…");
       }
     }, 200);
     try {
@@ -1449,20 +1808,16 @@
       const visionRow = rows.find(r => r.name && r.name.toLowerCase().includes("vision"));
       if (visionRow) {
         if (visionRow.ok) {
-          pillVision.className = "status-pill ok";
-          pillVision.innerHTML = '<span class="pill-icon">✓</span> Gemini CLI detected';
+          setPill(pillVision, "ok", "Gemini CLI detected");
         } else {
-          pillVision.className = "status-pill warn";
-          pillVision.innerHTML = '<span class="pill-icon">⚠️</span> Not found — image analysis unavailable';
+          setPill(pillVision, "warn", "Not found — image analysis unavailable");
         }
       } else {
-        pillVision.className = "status-pill warn";
-        pillVision.innerHTML = '<span class="pill-icon">⚠️</span> Vision status unknown';
+        setPill(pillVision, "warn", "Vision status unknown");
       }
     } catch (_) {
       clearTimeout(visionTimer);
-      pillVision.className = "status-pill warn";
-      pillVision.innerHTML = '<span class="pill-icon">⚠️</span> Check failed';
+      setPill(pillVision, "warn", "Check failed");
     }
   }
 
@@ -1611,6 +1966,12 @@
   // ── Boot ──────────────────────────────────────────
   async function boot() {
     messageList.appendChild(emptyState());
+    // Load the persona name for assistant turn labels and the empty state.
+    backend("get_persona", {})
+      .then((p) => {
+        if (p && p.name) { personaName = p.name; updatePersonaLabels(); }
+      })
+      .catch(() => {});
     try {
       const history = await backend("get_history", {});
       if (Array.isArray(history) && history.length) {

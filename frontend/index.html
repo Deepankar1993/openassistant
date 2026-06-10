@@ -5,21 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>openAssistant</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- highlight.js theme — href is swapped by theme.js when the app theme changes -->
+  <link rel="stylesheet" href="vendor/hljs-github.min.css" id="hljs-theme" />
+  <!-- Theme bootstraps in <head> so the correct palette applies before first paint -->
+  <script src="theme.js"></script>
 </head>
 <body>
   <div class="app">
     <!-- Left navigation rail (OpenHumans-style) -->
     <nav class="rail" aria-label="Primary">
       <div class="brand">
-        <div class="brand-mark">🦉</div>
+        <div class="brand-mark" aria-hidden="true">oA</div>
         <span class="brand-name">openAssistant</span>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle theme"></button>
       </div>
       <ul class="nav">
-        <li><button class="nav-item active" data-view="chat" data-testid="nav-chat"><span class="nav-ico">💬</span>Chat</button></li>
-        <li><button class="nav-item" data-view="memory" data-testid="nav-memory"><span class="nav-ico">🧠</span>Memory</button></li>
-        <li><button class="nav-item" data-view="status" data-testid="nav-status"><span class="nav-ico">🔌</span>Status</button></li>
-        <li><button class="nav-item" data-view="skills" data-testid="nav-skills"><span class="nav-ico">✨</span>Skills</button></li>
-        <li><button class="nav-item" data-view="settings" data-testid="nav-settings"><span class="nav-ico">⚙️</span>Settings</button></li>
+        <li><button class="nav-item active" data-view="chat" data-testid="nav-chat"><span class="nav-ico"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span>Chat</button></li>
+        <li><button class="nav-item" data-view="memory" data-testid="nav-memory"><span class="nav-ico"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>Memory</button></li>
+        <li><button class="nav-item" data-view="status" data-testid="nav-status"><span class="nav-ico"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>Status</button></li>
+        <li><button class="nav-item" data-view="skills" data-testid="nav-skills"><span class="nav-ico"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>Skills</button></li>
+        <li><button class="nav-item" data-view="settings" data-testid="nav-settings"><span class="nav-ico"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>Settings</button></li>
       </ul>
       <div class="rail-footer">
         <span class="dot" id="conn-dot"></span>
@@ -46,6 +51,7 @@
 
         <div class="chat-body">
           <div class="messages" id="message-list" data-testid="message-list" aria-live="polite"></div>
+          <button class="jump-bottom hidden" id="jump-bottom" type="button" aria-label="Jump to latest message"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg><span>Latest</span></button>
           <div class="composer">
             <textarea id="chat-input" data-testid="chat-input" rows="1"
               placeholder="Message openAssistant…" autocomplete="off"></textarea>
@@ -420,9 +426,13 @@
           <div class="panel-right" id="memory-panel-right">
             <div class="memory-toolbar hidden" id="memory-toolbar">
               <span id="memory-file-label" class="memory-file-label"></span>
-              <button class="btn small primary" id="memory-save-btn" data-testid="memory-save">Save</button>
+              <div class="memory-toolbar-actions">
+                <button class="btn small" id="memory-mode-btn" data-testid="memory-mode">Preview</button>
+                <button class="btn small primary" id="memory-save-btn" data-testid="memory-save">Save</button>
+              </div>
             </div>
             <textarea id="memory-content" data-testid="memory-content" class="memory-textarea" placeholder="Select a file on the left to view its content…" readonly></textarea>
+            <div id="memory-rendered" data-testid="memory-rendered" class="memory-rendered hidden"></div>
           </div>
         </div>
       </section>
@@ -578,14 +588,14 @@
         <h2 class="wizard-title">How much access should openAssistant have?</h2>
         <div class="tools-cards" id="onboard-tools-cards">
           <div class="tools-card" id="onboard-tools-card-a" data-testid="onboard-tools-card-a" tabindex="0" role="radio" aria-checked="false">
-            <div class="tools-card-icon">🔒</div>
+            <div class="tools-card-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
             <div class="tools-card-content">
               <strong>Chat only</strong>
               <p>No file or shell access. Safer for most users.</p>
             </div>
           </div>
           <div class="tools-card" id="onboard-tools-card-b" data-testid="onboard-tools-card-b" tabindex="0" role="radio" aria-checked="false">
-            <div class="tools-card-icon">💻</div>
+            <div class="tools-card-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
             <div class="tools-card-content">
               <strong>Enable tools</strong>
               <p>The assistant can run shell commands and read/write files. You'll confirm each command.</p>
@@ -608,13 +618,13 @@
         </div>
         <div class="status-pills" style="margin-top:24px;">
           <div class="status-pill pending" id="onboard-pill-config" data-testid="onboard-pill-config">
-            <span class="pill-icon">⏳</span> Config saved
+            <span class="pill-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span> Config saved
           </div>
           <div class="status-pill pending" id="onboard-pill-datadir" data-testid="onboard-pill-datadir">
-            <span class="pill-icon">⏳</span> Data directory ready
+            <span class="pill-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span> Data directory ready
           </div>
           <div class="status-pill pending" id="onboard-pill-vision" data-testid="onboard-pill-vision">
-            <span class="pill-icon">⏳</span> Vision tools
+            <span class="pill-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span> Vision tools
           </div>
         </div>
       </div>
@@ -638,7 +648,7 @@
         </label>
         <label class="field">
           <span>Content (Markdown)</span>
-          <textarea id="skill-modal-content" data-testid="skill-modal-content" rows="8" style="font-family:monospace;font-size:13px;resize:vertical;"></textarea>
+          <textarea id="skill-modal-content" data-testid="skill-modal-content" rows="8" style="font-family:var(--font-mono);font-size:13px;resize:vertical;"></textarea>
         </label>
       </div>
       <div class="actions" style="margin-top:16px;">
@@ -648,6 +658,12 @@
     </div>
   </div>
 
+  <!-- Vendored libraries (see frontend/vendor/) -->
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <!-- App modules: markdown.js defines OAIcons/OAMarkdown used by app.js -->
+  <script src="markdown.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

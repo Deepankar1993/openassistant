@@ -4,12 +4,18 @@
 //! server when Slack is configured.
 
 use anyhow::Result;
+use axum::response::sse::{Event, Sse};
+use axum::response::{Html, IntoResponse};
 use axum::{extract::State, routing::{get, post}, Json, Router};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+
+use crate::core::agent::AgentEvent;
 
 use crate::config::Config;
 use crate::core::agent::Agent;
@@ -75,7 +81,13 @@ struct SendMessage {
 pub fn build_router(state: GatewayState) -> Router {
     let mut app = Router::new()
         .route("/", get(index_handler))
-        .route("/api/messages", get(list_messages).post(send_message));
+        .route("/api/messages", get(list_messages).post(send_message))
+        .route("/api/chat/stream", post(chat_stream))
+        .route("/vendor/marked.min.js", get(|| async { js(VENDOR_MARKED) }))
+        .route("/vendor/purify.min.js", get(|| async { js(VENDOR_PURIFY) }))
+        .route("/vendor/highlight.min.js", get(|| async { js(VENDOR_HLJS) }))
+        .route("/vendor/hljs-github.min.css", get(|| async { css(VENDOR_HLJS_LIGHT) }))
+        .route("/vendor/hljs-github-dark.min.css", get(|| async { css(VENDOR_HLJS_DARK) }));
 
     if !state.config.gateway.slack_signing_secret.is_empty()
         || !state.config.gateway.slack_token.is_empty()
@@ -105,9 +117,15 @@ pub fn build_state(config: Config) -> GatewayState {
 }
 
 pub async fn start(config: Config) -> Result<()> {
+    start_on(config, None).await
+}
+
+/// Start the WebChat server, optionally overriding the configured port (used
+/// by the `web` CLI command's `--port` flag).
+pub async fn start_on(config: Config, port_override: Option<u16>) -> Result<()> {
     // Host/port resolve through the shared helpers (empty host ⇒ 0.0.0.0, port 0 ⇒ 3000).
     let host = crate::config::webchat_host(&config);
-    let port = crate::config::webchat_port(&config);
+    let port = port_override.unwrap_or_else(|| crate::config::webchat_port(&config));
     let state = build_state(config);
     let app = build_router(state);
 
@@ -119,8 +137,55 @@ pub async fn start(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn index_handler() -> String {
-    "openAssistant WebChat API is running. POST {\"content\":\"...\"} to /api/messages to chat.".to_string()
+// ── Static assets (vendored, embedded in the binary) ──
+
+const WEBCHAT_PAGE: &str = include_str!("webchat_page.html");
+const VENDOR_MARKED: &str = include_str!("../../frontend/vendor/marked.min.js");
+const VENDOR_PURIFY: &str = include_str!("../../frontend/vendor/purify.min.js");
+const VENDOR_HLJS: &str = include_str!("../../frontend/vendor/highlight.min.js");
+const VENDOR_HLJS_LIGHT: &str = include_str!("../../frontend/vendor/hljs-github.min.css");
+const VENDOR_HLJS_DARK: &str = include_str!("../../frontend/vendor/hljs-github-dark.min.css");
+
+fn js(body: &'static str) -> impl IntoResponse {
+    ([("content-type", "application/javascript; charset=utf-8")], body)
+}
+
+fn css(body: &'static str) -> impl IntoResponse {
+    ([("content-type", "text/css; charset=utf-8")], body)
+}
+
+async fn index_handler() -> Html<&'static str> {
+    Html(WEBCHAT_PAGE)
+}
+
+/// Streaming chat: runs the agent turn in a background task and forwards each
+/// `AgentEvent` as one SSE `data:` line of JSON. The web conversation lock is
+/// held by the task for the whole turn (same serialization as `send_message`).
+async fn chat_stream(
+    State(state): State<GatewayState>,
+    Json(payload): Json<SendMessage>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    tokio::spawn(async move {
+        let mut guard = state.web.lock().await;
+        let convo = &mut *guard;
+        convo.messages.push(ChatMessage::new("user", payload.content.clone()));
+        // process_events emits Done/Error itself; a dropped receiver (client
+        // hit Stop / disconnected) just makes sends no-ops.
+        if let Ok(reply) = state
+            .agent
+            .process_events(&payload.content, &mut convo.ctx, &mut convo.session, tx)
+            .await
+        {
+            convo.messages.push(ChatMessage::new("assistant", reply));
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|ev| {
+        Ok(Event::default().data(serde_json::to_string(&ev).unwrap_or_else(|_| "{}".into())))
+    });
+    Sse::new(stream)
 }
 
 async fn list_messages(State(state): State<GatewayState>) -> Json<Vec<ChatMessage>> {

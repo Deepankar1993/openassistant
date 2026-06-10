@@ -72,6 +72,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // chat
             commands::chat::send_message,
+            commands::chat::send_message_stream,
             commands::chat::get_history,
             commands::chat::get_status,
             commands::chat::clear_conversation,
