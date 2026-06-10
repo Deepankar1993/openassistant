@@ -399,9 +399,24 @@ impl Agent {
             }
             "web_search" => {
                 let query = tool_call.arguments["query"].as_str().unwrap_or("");
+                if query.is_empty() {
+                    return Ok("web_search: missing 'query' argument.".to_string());
+                }
                 let engine = tool_call.arguments["engine"].as_str().unwrap_or("duckduckgo");
-                let url = format!("https://www.google.com/search?q={}", urlencoding::encode(query));
-                Ok(format!("Web search ({}) for '{}': {}", engine, query, url))
+                let ws = crate::core::web_search::WebSearch::default();
+                match ws.search_with(engine, query).await {
+                    Ok(results) if results.is_empty() => {
+                        Ok(format!("Web search ({}): no results for '{}'.", engine, query))
+                    }
+                    Ok(results) => {
+                        let mut out = format!("Web search results for '{}':\n", query);
+                        for r in results.iter().take(5) {
+                            out.push_str(&format!("- {} — {}\n  {}\n", r.title, r.url, r.snippet));
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Ok(format!("Web search failed ({}): {}", engine, e)),
+                }
             }
             // ── Legacy openAssistant tools ──
             "shell" => {
