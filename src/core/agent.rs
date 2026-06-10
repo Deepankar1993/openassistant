@@ -241,6 +241,16 @@ impl Agent {
             };
             let mut iterations = 0;
             while let Some(tool_call) = self.parse_tool_call(&response) {
+                // A closed event sink means the streaming client is gone
+                // (Stop pressed / tab closed). Abort the turn early so a
+                // long multi-tool run can't hold the conversation lock —
+                // and block other clients — for minutes after disconnect.
+                if let Some(tx) = events {
+                    if tx.is_closed() {
+                        debug!("event sink closed — aborting turn early");
+                        break;
+                    }
+                }
                 if iterations >= MAX_TOOL_ITERATIONS {
                     response.push_str("\n\n[Stopped: tool iteration limit reached for this turn.]");
                     break;
@@ -1157,6 +1167,21 @@ pub(crate) async fn call_llm_stream(
                 }
                 None => {}
             }
+        }
+    }
+
+    // The stream ended without [DONE]. The remaining buffer may hold a final
+    // SSE line that arrived without a trailing newline — parse it first.
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf);
+        if let Some(SseLine::Json(v)) = parse_sse_line(&line) {
+            if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
+                if !t.is_empty() {
+                    full.push_str(t);
+                    let _ = tx.send(AgentEvent::Token { text: t.to_string() });
+                }
+            }
+            return Ok(full);
         }
     }
 

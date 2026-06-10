@@ -570,16 +570,15 @@ main {
   }
 
   var mdReady = typeof marked !== "undefined" && typeof DOMPurify !== "undefined";
-  if (mdReady && marked.setOptions) {
-    marked.setOptions({ gfm: true, breaks: true });
-  }
 
   /** Render markdown (sanitized) into el; fall back to escaped plain text. */
   function renderMarkdown(el, text) {
     if (mdReady) {
       try {
         el.classList.remove("plain");
-        el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+        // Per-call options: marked v5+ removed setOptions (the desktop's
+        // markdown.js uses the same per-call API).
+        el.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
         return;
       } catch (e) { /* fall through to plain text */ }
     }
