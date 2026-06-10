@@ -36,6 +36,36 @@ const MAX_TOOL_ITERATIONS: usize = 6;
 /// Max bytes of a single tool output fed back to the model.
 const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
+/// Streaming events emitted during an agent turn. The JSON shape (`type` tag,
+/// snake_case) is a frozen contract consumed by the WebChat SSE client and the
+/// desktop `chat-event` listener — change it only with both frontends.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    Token { text: String },
+    ToolStart { name: String, summary: String },
+    ToolEnd { name: String, ok: bool, preview: String },
+    Done { text: String },
+    Error { message: String },
+}
+
+/// One parsed SSE line from a chat-completions stream.
+#[derive(Debug)]
+pub(crate) enum SseLine {
+    Done,
+    Json(serde_json::Value),
+}
+
+/// Parse a single SSE line: only `data:` lines matter; `[DONE]` ends the
+/// stream; comments/event lines/garbage are ignored.
+pub(crate) fn parse_sse_line(line: &str) -> Option<SseLine> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    if data == "[DONE]" {
+        return Some(SseLine::Done);
+    }
+    serde_json::from_str::<serde_json::Value>(data).ok().map(SseLine::Json)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -149,6 +179,34 @@ impl Agent {
         ctx: &mut FullContext,
         session: &mut Session,
     ) -> Result<String> {
+        self.process_inner(message, ctx, session, None).await
+    }
+
+    /// Like `process`, but streams `AgentEvent`s (tokens, tool steps) to `tx`
+    /// while the turn runs. Always ends with a `Done` or `Error` event. Send
+    /// failures are ignored — a disconnected client must not poison the turn.
+    pub async fn process_events(
+        &self,
+        message: &str,
+        ctx: &mut FullContext,
+        session: &mut Session,
+        tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<String> {
+        let result = self.process_inner(message, ctx, session, Some(&tx)).await;
+        match &result {
+            Ok(text) => { let _ = tx.send(AgentEvent::Done { text: text.clone() }); }
+            Err(e) => { let _ = tx.send(AgentEvent::Error { message: e.to_string() }); }
+        }
+        result
+    }
+
+    async fn process_inner(
+        &self,
+        message: &str,
+        ctx: &mut FullContext,
+        session: &mut Session,
+        events: Option<&tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    ) -> Result<String> {
         info!("Processing: {}", &message[..message.len().min(80)]);
 
         // Add daily note about this interaction
@@ -172,7 +230,7 @@ impl Agent {
         // call (or the iteration cap is hit). Skipped when tool dispatch is
         // disabled.
         let mut messages = messages;
-        let mut response = self.call_llm(&messages).await?;
+        let mut response = self.call_llm_events(&messages, events).await?;
 
         let final_response = if self.tools_enabled {
             let config = crate::config::load().await?;
@@ -190,17 +248,31 @@ impl Agent {
                 iterations += 1;
                 debug!("Tool round {}: {}", iterations, tool_call.name);
 
+                if let Some(tx) = events {
+                    let _ = tx.send(AgentEvent::ToolStart {
+                        name: tool_call.name.clone(),
+                        summary: Self::tool_summary(&tool_call),
+                    });
+                }
+                let mut ok = true;
                 let output = match self.check_permission(&rules, &tool_call) {
                     Ok(()) => match self.execute_tool(&tool_call, ctx, session, &mem).await {
                         Ok(out) => out,
                         // Execution errors go back to the model as text so it
                         // can recover; only transport/config errors from
                         // call_llm abort the turn.
-                        Err(e) => format!("Tool '{}' failed: {}", tool_call.name, e),
+                        Err(e) => { ok = false; format!("Tool '{}' failed: {}", tool_call.name, e) }
                     },
-                    Err(denial) => denial,
+                    Err(denial) => { ok = false; denial }
                 };
                 let output = truncate_output(&output, MAX_TOOL_OUTPUT_BYTES);
+                if let Some(tx) = events {
+                    let _ = tx.send(AgentEvent::ToolEnd {
+                        name: tool_call.name.clone(),
+                        ok,
+                        preview: truncate_output(&output, 200),
+                    });
+                }
 
                 // Record the trajectory in both the working message list and
                 // the session, so later turns keep the tool context.
@@ -210,7 +282,7 @@ impl Agent {
                 messages.push(serde_json::json!({"role": "assistant", "content": response}));
                 messages.push(serde_json::json!({"role": "user", "content": result_msg}));
 
-                response = self.call_llm(&messages).await?;
+                response = self.call_llm_events(&messages, events).await?;
             }
             response
         } else {
@@ -316,6 +388,24 @@ impl Agent {
         let client = reqwest::Client::new();
         let (api_base, api_key, model) = self.text_target(&config);
         call_llm_raw(&client, api_base, api_key, model, messages).await
+    }
+
+    /// LLM call that streams tokens to `tx` when an event sink is attached,
+    /// otherwise behaves exactly like `call_llm`.
+    async fn call_llm_events(
+        &self,
+        messages: &[serde_json::Value],
+        events: Option<&tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    ) -> Result<String> {
+        match events {
+            Some(tx) => {
+                let config = crate::config::load().await?;
+                let client = reqwest::Client::new();
+                let (api_base, api_key, model) = self.text_target(&config);
+                call_llm_stream(&client, api_base, api_key, model, messages, tx).await
+            }
+            None => self.call_llm(messages).await,
+        }
     }
 
     /// Execute a single parsed tool call and return ONLY the tool output —
@@ -597,6 +687,24 @@ impl Agent {
     async fn handle_goal_list(&self) -> Result<String> {
         let store = super::goal_store::GoalStore::open_default()?;
         Ok(store.format())
+    }
+
+    /// One-line human summary of a tool call for the streaming tool timeline.
+    fn tool_summary(tool_call: &ToolCall) -> String {
+        let args = &tool_call.arguments;
+        let s = match tool_call.name.as_str() {
+            "bash" | "shell" => args["command"].as_str().unwrap_or(""),
+            "read" | "write" | "edit" => args["path"].as_str().unwrap_or(""),
+            "glob" | "grep" => args["pattern"].as_str().unwrap_or(""),
+            "web_search" => args["query"].as_str().unwrap_or(""),
+            "task" => args["description"].as_str().unwrap_or(""),
+            _ => "",
+        };
+        if s.is_empty() {
+            truncate_output(&args.to_string(), 80)
+        } else {
+            truncate_output(s, 80)
+        }
     }
 
     /// Restrict the default tool set to an allowlist (sub-agent tool scoping).
@@ -985,6 +1093,86 @@ pub(crate) async fn call_llm_raw(
         .to_string())
 }
 
+/// Streaming chat-completions call: requests `"stream": true`, parses the SSE
+/// body line-by-line, forwards each content delta as an `AgentEvent::Token`,
+/// and returns the full accumulated text. Providers that ignore `stream` and
+/// return a plain JSON body degrade gracefully to a single Token event.
+pub(crate) async fn call_llm_stream(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[serde_json::Value],
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+) -> Result<String> {
+    use futures::StreamExt;
+
+    if api_key.trim().is_empty() {
+        anyhow::bail!(
+            "No API key configured for model '{}'. Set model.api_key (or the routed provider's key) first.",
+            model
+        );
+    }
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 8192,
+        "stream": true,
+    });
+
+    let resp = client
+        .post(format!("{}/chat/completions", api_base))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(500).collect();
+        anyhow::bail!("LLM request failed: HTTP {status} — {snippet}");
+    }
+
+    let mut full = String::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk?);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            match parse_sse_line(&line) {
+                Some(SseLine::Done) => return Ok(full),
+                Some(SseLine::Json(v)) => {
+                    if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
+                        if !t.is_empty() {
+                            full.push_str(t);
+                            let _ = tx.send(AgentEvent::Token { text: t.to_string() });
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+
+    // Provider ignored `stream` (or sent one unterminated JSON body): parse the
+    // remaining buffer as a plain chat-completions response.
+    if full.is_empty() && !buf.is_empty() {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
+            if let Some(t) = v["choices"][0]["message"]["content"].as_str() {
+                full.push_str(t);
+                let _ = tx.send(AgentEvent::Token { text: t.to_string() });
+            }
+        }
+    }
+    Ok(full)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,6 +1244,48 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("depth"), "must refuse with a depth explanation: {}", out);
+    }
+
+    #[test]
+    fn agent_event_json_shape_is_stable() {
+        // The frontends parse these exact shapes — this is the frozen contract.
+        let ev = AgentEvent::Token { text: "hi".into() };
+        assert_eq!(serde_json::to_string(&ev).unwrap(), r#"{"type":"token","text":"hi"}"#);
+        let ev = AgentEvent::ToolStart { name: "bash".into(), summary: "ls".into() };
+        assert_eq!(serde_json::to_string(&ev).unwrap(), r#"{"type":"tool_start","name":"bash","summary":"ls"}"#);
+        let ev = AgentEvent::ToolEnd { name: "bash".into(), ok: true, preview: "x".into() };
+        assert_eq!(serde_json::to_string(&ev).unwrap(), r#"{"type":"tool_end","name":"bash","ok":true,"preview":"x"}"#);
+        let ev = AgentEvent::Done { text: "t".into() };
+        assert_eq!(serde_json::to_string(&ev).unwrap(), r#"{"type":"done","text":"t"}"#);
+        let ev = AgentEvent::Error { message: "m".into() };
+        assert_eq!(serde_json::to_string(&ev).unwrap(), r#"{"type":"error","message":"m"}"#);
+    }
+
+    #[test]
+    fn parse_sse_line_handles_data_done_and_noise() {
+        assert!(matches!(parse_sse_line("data: [DONE]"), Some(SseLine::Done)));
+        match parse_sse_line(r#"data: {"choices":[{"delta":{"content":"hey"}}]}"#) {
+            Some(SseLine::Json(v)) => {
+                assert_eq!(v["choices"][0]["delta"]["content"].as_str(), Some("hey"));
+            }
+            other => panic!("expected Json, got {:?}", other),
+        }
+        assert!(parse_sse_line(": keepalive").is_none());
+        assert!(parse_sse_line("").is_none());
+        assert!(parse_sse_line("event: ping").is_none());
+        assert!(parse_sse_line("data: not-json").is_none());
+    }
+
+    #[test]
+    fn tool_summary_describes_common_tools() {
+        let call = ToolCall { name: "bash".into(), arguments: serde_json::json!({"command": "cargo test"}) };
+        assert_eq!(Agent::tool_summary(&call), "cargo test");
+        let call = ToolCall { name: "read".into(), arguments: serde_json::json!({"path": "src/main.rs"}) };
+        assert_eq!(Agent::tool_summary(&call), "src/main.rs");
+        let call = ToolCall { name: "web_search".into(), arguments: serde_json::json!({"query": "rust sse"}) };
+        assert_eq!(Agent::tool_summary(&call), "rust sse");
+        let call = ToolCall { name: "goal_list".into(), arguments: serde_json::json!({}) };
+        assert_eq!(Agent::tool_summary(&call), "{}");
     }
 
     #[test]
