@@ -92,7 +92,10 @@ pub fn build_state(config: Config) -> GatewayState {
     let data_dir = config.general.data_dir.clone();
     let agent = Agent::new(config.model.model.clone())
         .with_workspace(data_dir.clone())
-        .with_tools_enabled(config.tools.enabled);
+        .with_tools_enabled(config.tools.enabled)
+        .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
+            &config.permissions.gateway_mode,
+        ));
     GatewayState {
         agent: Arc::new(agent),
         web: Arc::new(Mutex::new(Convo::new("webchat", "web", &data_dir))),

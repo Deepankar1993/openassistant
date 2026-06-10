@@ -361,7 +361,10 @@ pub async fn start(config: Config) -> Result<()> {
 
     let agent = Agent::new(config.model.model.clone())
         .with_workspace(config.general.data_dir.clone())
-        .with_tools_enabled(config.tools.enabled);
+        .with_tools_enabled(config.tools.enabled)
+        .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
+            &config.permissions.gateway_mode,
+        ));
 
     let home = config.gateway.discord_home_channel.trim().parse::<u64>().ok();
 
