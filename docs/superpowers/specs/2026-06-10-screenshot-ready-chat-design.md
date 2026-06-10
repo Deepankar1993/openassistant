@@ -64,15 +64,24 @@ pub enum AgentEvent {
   the tool step arrives (the raw `[TOOL:...]` markup is stripped client-side for
   display; v1 keeps server simple).
 
-### 2. WebChat SSE (`src/gateway/webchat.rs` + `src/ui/web.rs`)
+### 2. WebChat: consolidate to ONE real web UI (`src/gateway/webchat.rs`)
 
-- New route `POST /api/chat/stream` → `axum::response::sse::Sse` stream. Handler
-  spawns `process_events` with an unbounded channel; each `AgentEvent` is one SSE
-  `data:` line of JSON. Existing `/api/chat` stays (fallback + Slack reuse).
-- Static assets: vendored `marked.min.js`, `purify.min.js`, `highlight.min.js` +
-  one hljs theme css, served from new routes (`/vendor/*`) via `include_str!` from
-  `frontend/vendor/` (single copy shared with the desktop app).
-- The page HTML/CSS/JS in `src/ui/web.rs` is rewritten to the new design system.
+Audit finding: the `web` command's pretty UI (`src/ui/web.rs`) is a **fake** —
+`handle_chat` returns hardcoded "This is a simulated response" text and never
+calls the agent — while the real gateway webchat serves no HTML at all. Shipping
+a simulated-chat surface is exactly the toy-signal this batch exists to kill.
+
+- The gateway webchat becomes THE web UI: `GET /` serves the new page (a single
+  HTML file at `src/gateway/webchat_page.html`, embedded via `include_str!`).
+- New route `POST /api/chat/stream` → `axum::response::sse::Sse`. Handler spawns
+  `process_events` with an unbounded channel; each `AgentEvent` is one SSE
+  `data:` JSON line. Existing `/api/messages` JSON API stays (programmatic use).
+- Vendored `marked.min.js`, `purify.min.js`, `highlight.min.js` + hljs theme css
+  served at `/vendor/*` via `include_str!` from `frontend/vendor/` (single copy
+  shared with the desktop app).
+- The `web` CLI command is repointed to start the gateway webchat server (with
+  its port flag); `src/ui/web.rs`'s simulated handler and embedded page are
+  removed.
 
 ### 3. Desktop streaming (`src-tauri/src/commands/chat.rs` + `frontend/app.js`)
 
@@ -87,9 +96,10 @@ pub enum AgentEvent {
 
 "Warm editorial workshop" direction from the UX research:
 
-- **Type:** display serif (self-hosted *Fraunces* or *Source Serif 4* woff2) for
-  persona name/headers; system grotesque for UI/body (15px/1.65); *JetBrains Mono*
-  for code. Message column max ~72ch.
+- **Type:** display serif via system stacks (no font binaries in repo — YAGNI):
+  `Iowan Old Style, Palatino Linotype, Georgia, serif` for persona name/headers;
+  system grotesque for UI/body (15px/1.65); `JetBrains Mono, Cascadia Code,
+  Consolas, monospace` for code. Message column max ~72ch.
 - **Color:** warm paper light theme (`#faf8f4`) / warm charcoal dark (`#1a1816`),
   single burnt-ochre accent (`#b45309` range), **no gradients**. Assistant turns
   bubble-less (flat on background, serif name label); user turns subtly tinted
