@@ -26,6 +26,11 @@ pub struct Config {
     /// openAssistant can delegate turns to `claude -p` with session continuity.
     #[serde(default)]
     pub claude: ClaudeBridgeConfig,
+    /// Built-in tool permission posture. Rules apply at every mode (deny beats
+    /// bypass); `gateway_mode` caps remote channels (Discord/Telegram/Slack/
+    /// WebChat) the same way the claude bridge caps remote origins.
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
 }
 
 /// Configuration for the Claude Code CLI bridge.
@@ -101,6 +106,31 @@ pub struct RoutingConfig {
 /// user's opt-in (or opt-out) of shell/file access survives restarts.
 /// `#[serde(default)]` on the `Config.tools` field keeps existing config.yaml
 /// files (written before this section existed) loadable.
+/// Permission posture for the built-in agent's tools. Local front-ends keep
+/// full autonomy (BypassPermissions) to preserve pre-existing behavior; the
+/// gateway constructs agents with `gateway_mode` instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermissionsConfig {
+    /// Permission mode for remote gateway channels: default | acceptEdits |
+    /// auto | bypassPermissions.
+    pub gateway_mode: String,
+    pub allow: Vec<String>,
+    pub ask: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            gateway_mode: "acceptEdits".to_string(),
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
@@ -237,6 +267,11 @@ impl Default for VisionConfig {
     }
 }
 
+/// Parse a comma-separated config value into a trimmed, non-empty list.
+fn split_list(value: &str) -> Vec<String> {
+    value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
 fn default_data_dir() -> String {
     format!("{}/.openassistant", std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -274,11 +309,7 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         "model.api_key" => config.model.api_key = value.to_string(),
         "gateway.discord_token" => config.gateway.discord_token = value.to_string(),
         "gateway.discord_allowed_users" => {
-            config.gateway.discord_allowed_users = value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
+            config.gateway.discord_allowed_users = split_list(value)
         }
         "gateway.dm_policy" => config.gateway.dm_policy = value.to_string(),
         "gateway.discord_home_channel" => config.gateway.discord_home_channel = value.to_string(),
@@ -309,6 +340,10 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid timeout '{}' (expected seconds)", value))?
         }
+        "permissions.gateway_mode" => config.permissions.gateway_mode = value.to_string(),
+        "permissions.allow" => config.permissions.allow = split_list(value),
+        "permissions.ask" => config.permissions.ask = split_list(value),
+        "permissions.deny" => config.permissions.deny = split_list(value),
         _ => tracing::warn!("Unknown config key: {}", key),
     }
     save(&config).await?;
@@ -440,6 +475,59 @@ vision:
         assert_eq!(base, "https://openrouter.ai/api/v1");
         assert_eq!(key, "legacy-key");
         assert_eq!(model, "openrouter/owl-alpha");
+    }
+
+    #[test]
+    fn permissions_config_defaults_and_round_trip() {
+        let cfg = Config::default();
+        assert_eq!(cfg.permissions.gateway_mode, "acceptEdits");
+        assert!(cfg.permissions.deny.is_empty());
+
+        let mut cfg2 = Config::default();
+        cfg2.permissions.deny = vec!["Bash(rm *)".into()];
+        cfg2.permissions.gateway_mode = "default".into();
+        let yaml = serde_yaml::to_string(&cfg2).expect("serialize");
+        let back: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(back.permissions.deny, vec!["Bash(rm *)".to_string()]);
+        assert_eq!(back.permissions.gateway_mode, "default");
+
+        // YAML written before the `permissions:` key existed must still load
+        // (serde default). Same shape as the legacy-routing test fixture.
+        let legacy = "
+general:
+  data_dir: /tmp/oa
+  log_level: info
+  name: openAssistant
+  user_name: User
+model:
+  provider: openrouter
+  model: openrouter/owl-alpha
+  api_key: legacy-key
+  api_base: https://openrouter.ai/api/v1
+gateway:
+  discord_token: ''
+  discord_allowed_users: []
+  telegram_token: ''
+  slack_token: ''
+  slack_signing_secret: ''
+  webhook_port: 0
+  dm_policy: pairing
+memory:
+  db_path: /tmp/oa/memory.db
+  max_entries: 100000
+  fts_enabled: true
+skills:
+  dirs: []
+  auto_create: true
+security:
+  dm_pairing: true
+  allow_from: []
+vision:
+  provider: gemini-cli
+  gemini_path: gemini
+";
+        let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
+        assert_eq!(cfg3.permissions.gateway_mode, "acceptEdits");
     }
 
     #[test]

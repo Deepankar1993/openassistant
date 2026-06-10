@@ -28,7 +28,10 @@ pub async fn start(config: Config) -> Result<()> {
     let data_dir = config.general.data_dir.clone();
     let agent = Agent::new(config.model.model.clone())
         .with_workspace(data_dir.clone())
-        .with_tools_enabled(config.tools.enabled);
+        .with_tools_enabled(config.tools.enabled)
+        .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
+            &config.permissions.gateway_mode,
+        ));
 
     let client = reqwest::Client::new();
     let api = format!("https://api.telegram.org/bot{}", token);

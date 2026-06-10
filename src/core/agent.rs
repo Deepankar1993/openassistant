@@ -21,7 +21,20 @@ pub struct Agent {
     /// shell/file access without explicit user consent. See openspec change
     /// `add-desktop-app`, task 2.10.
     pub tools_enabled: bool,
+    /// Permission posture for tool dispatch. Local front-ends keep the
+    /// pre-existing full-autonomy behavior (BypassPermissions); gateway
+    /// channels cap this via `with_permission_mode` (origin-aware, like the
+    /// claude bridge). Config deny/ask rules apply at EVERY mode.
+    pub permission_mode: super::permissions::PermissionMode,
+    /// Sub-agent nesting depth: 0 = top-level. Sub-agents get depth+1 and
+    /// refuse to spawn further sub-agents.
+    pub depth: u8,
 }
+
+/// Max LLM⇄tool rounds per user turn.
+const MAX_TOOL_ITERATIONS: usize = 6;
+/// Max bytes of a single tool output fed back to the model.
+const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -50,6 +63,8 @@ impl Agent {
             tools: Self::default_tools(),
             workspace_dir: crate::config::data_dir_default(),
             tools_enabled: true,
+            permission_mode: super::permissions::PermissionMode::BypassPermissions,
+            depth: 0,
         }
     }
 
@@ -63,6 +78,68 @@ impl Agent {
     pub fn with_tools_enabled(mut self, enabled: bool) -> Self {
         self.tools_enabled = enabled;
         self
+    }
+
+    /// Cap the permission mode for this agent's tool dispatch (origin-aware:
+    /// remote gateway channels pass a stricter mode than local front-ends).
+    pub fn with_permission_mode(mut self, mode: super::permissions::PermissionMode) -> Self {
+        self.permission_mode = mode;
+        self
+    }
+
+    /// Key used for rule matching: bash/shell check as `Bash(<command>)` so
+    /// command wildcards like `Bash(git *)` work; other tools check by name.
+    fn permission_key(tool_call: &ToolCall) -> String {
+        match tool_call.name.as_str() {
+            "bash" | "shell" => {
+                let cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                format!("Bash({})", cmd)
+            }
+            // self_manage's run_command action embeds a shell command and must
+            // be gated like bash so Bash(...) deny rules apply to it.
+            "self_manage" if tool_call.arguments["action"].as_str() == Some("run_command") => {
+                let cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                format!("Bash({})", cmd)
+            }
+            _ => tool_call.name.clone(),
+        }
+    }
+
+    /// Gate a tool call: config rules first (deny beats every mode, explicit
+    /// allow skips the mode check), then the session permission mode. `Ask`
+    /// resolves to a refusal because the agent runs headless — the text is
+    /// returned to the model as the tool result so it can adapt.
+    fn check_permission(
+        &self,
+        rules: &super::permissions::PermissionRules,
+        tool_call: &ToolCall,
+    ) -> Result<(), String> {
+        use super::permissions::PermissionAction;
+        // Rules are checked against the permission key (Bash(<command>) for
+        // shell tools) AND the raw tool name, so both `Bash(git *)` and plain
+        // `shell`/`bash` rules work as users expect.
+        let key = Self::permission_key(tool_call);
+        let action = rules
+            .check_explicit(&key)
+            .or_else(|| {
+                if key != tool_call.name {
+                    rules.check_explicit(&tool_call.name)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                self.permission_mode.check_action(&tool_call.name, &tool_call.arguments)
+            });
+        match action {
+            PermissionAction::Allow => Ok(()),
+            PermissionAction::Deny(msg) => Err(format!("⛔ {} — the call was blocked.", msg)),
+            PermissionAction::Ask(_) => Err(format!(
+                "⛔ Tool '{}' requires interactive approval, which is not available on this channel. \
+                 Explain to the user what you wanted to do instead.",
+                tool_call.name
+            )),
+        }
     }
 
     /// Process a message through the agent loop — full featured
@@ -90,12 +167,52 @@ impl Agent {
         // Build conversation messages
         let messages = self.build_messages(&system_prompt, session);
 
-        // Call the LLM
-        let response = self.call_llm(&messages).await?;
+        // Call the LLM, then loop: execute the requested tool, feed the result
+        // back, and let the model continue until it answers without a tool
+        // call (or the iteration cap is hit). Skipped when tool dispatch is
+        // disabled.
+        let mut messages = messages;
+        let mut response = self.call_llm(&messages).await?;
 
-        // Handle tool calls (skipped when tool dispatch is disabled)
         let final_response = if self.tools_enabled {
-            self.handle_tool_calls(response, ctx, session, &mem).await?
+            let config = crate::config::load().await?;
+            let rules = super::permissions::PermissionRules {
+                allow: config.permissions.allow.clone(),
+                ask: config.permissions.ask.clone(),
+                deny: config.permissions.deny.clone(),
+            };
+            let mut iterations = 0;
+            while let Some(tool_call) = self.parse_tool_call(&response) {
+                if iterations >= MAX_TOOL_ITERATIONS {
+                    response.push_str("\n\n[Stopped: tool iteration limit reached for this turn.]");
+                    break;
+                }
+                iterations += 1;
+                debug!("Tool round {}: {}", iterations, tool_call.name);
+
+                let output = match self.check_permission(&rules, &tool_call) {
+                    Ok(()) => match self.execute_tool(&tool_call, ctx, session, &mem).await {
+                        Ok(out) => out,
+                        // Execution errors go back to the model as text so it
+                        // can recover; only transport/config errors from
+                        // call_llm abort the turn.
+                        Err(e) => format!("Tool '{}' failed: {}", tool_call.name, e),
+                    },
+                    Err(denial) => denial,
+                };
+                let output = truncate_output(&output, MAX_TOOL_OUTPUT_BYTES);
+
+                // Record the trajectory in both the working message list and
+                // the session, so later turns keep the tool context.
+                let result_msg = format!("[TOOL RESULT: {}]\n{}", tool_call.name, output);
+                session.add_message(Message::assistant(&response));
+                session.add_message(Message::user(&result_msg));
+                messages.push(serde_json::json!({"role": "assistant", "content": response}));
+                messages.push(serde_json::json!({"role": "user", "content": result_msg}));
+
+                response = self.call_llm(&messages).await?;
+            }
+            response
         } else {
             response
         };
@@ -131,6 +248,7 @@ impl Agent {
                 prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
             }
             prompt.push('\n');
+            push_str(&mut prompt, "After you emit a tool call, STOP — the tool result will be sent back to you as a [TOOL RESULT: name] message, and you can then continue or emit the next tool call. One tool call per message.");
 
             // Self-management instructions
             push_str(&mut prompt, "# Self-Management");
@@ -200,130 +318,150 @@ impl Agent {
         call_llm_raw(&client, api_base, api_key, model, messages).await
     }
 
-    async fn handle_tool_calls(
+    /// Execute a single parsed tool call and return ONLY the tool output —
+    /// the agent loop feeds it back to the model as a [TOOL RESULT] message.
+    async fn execute_tool(
         &self,
-        response: String,
+        tool_call: &ToolCall,
         ctx: &mut FullContext,
         session: &mut Session,
         mem: &super::memory::MemoryWorkspace,
     ) -> Result<String> {
-        if let Some(tool_call) = self.parse_tool_call(&response) {
-            debug!("Tool call: {}", tool_call.name);
+        let _ = session; // kept in the signature for handlers that will need it
+        debug!("Tool call: {}", tool_call.name);
 
-            // Route to appropriate handler
-            match tool_call.name.as_str() {
-                // ── Claude Code core tools ──
-                "bash" => {
-                    let result = crate::tools::bash::execute(&tool_call.arguments).await?;
-                    Ok(format!("{}\n\nBash output:\n{}", response, result.output))
-                }
-                "read" => {
-                    let result = crate::tools::file::execute(&serde_json::json!({
-                        "action": "read",
-                        "path": tool_call.arguments["path"].as_str().unwrap_or("")
-                    })).await?;
-                    Ok(format!("{}\n\nFile content:\n{}", response, result.output))
-                }
-                "write" => {
-                    let result = crate::tools::file::execute(&serde_json::json!({
-                        "action": "write",
-                        "path": tool_call.arguments["path"].as_str().unwrap_or(""),
-                        "content": tool_call.arguments["content"].as_str().unwrap_or("")
-                    })).await?;
-                    Ok(format!("{}\n\nWrite result:\n{}", response, result.output))
-                }
-                "edit" => {
-                    let path = tool_call.arguments["path"].as_str().unwrap_or("");
-                    let old = tool_call.arguments["old_string"].as_str().unwrap_or("");
-                    let new = tool_call.arguments["new_string"].as_str().unwrap_or("");
-                    // Read file, replace, write back
-                    let read_result = crate::tools::file::execute(&serde_json::json!({
-                        "action": "read", "path": path
-                    })).await?;
-                    if read_result.success {
-                        let content = &read_result.output;
-                        if content.contains(old) {
-                            let replaced = content.replace(old, new);
-                            let write_result = crate::tools::file::execute(&serde_json::json!({
-                                "action": "write", "path": path, "content": replaced
-                            })).await?;
-                            Ok(format!("{}\n\nEdit result: {}", response, write_result.output))
-                        } else {
-                            Ok(format!("{}\n\nEdit error: old_string not found in {}", response, path))
-                        }
-                    } else {
-                        Ok(format!("{}\n\nEdit error: could not read {}", response, path))
-                    }
-                }
-                "glob" => {
-                    let result = crate::tools::file_search::glob(&tool_call.arguments).await?;
-                    let files: Vec<String> = result.files.clone();
-                    Ok(format!("{}\n\nGlob results ({} files):\n{}", response, result.total_found, files.join("\n")))
-                }
-                "grep" => {
-                    let result = crate::tools::file_search::grep(&tool_call.arguments).await?;
-                    let mut output = format!("{}\n\nGrep results ({} matches in {} files):\n", response, result.total_matches, result.files_searched);
-                    for m in &result.matches {
-                        output.push_str(&format!("  {}:{}: {}\n", m.file, m.line_number, m.line));
-                    }
-                    Ok(output)
-                }
-                "todo_write" => {
-                    self.handle_todo_write(&tool_call.arguments).await
-                }
-                "goal_deliberate" => {
-                    self.handle_goal_deliberate(&tool_call.arguments).await
-                }
-                "claude" => self.handle_claude(&tool_call.arguments).await,
-                "goal_create" => self.handle_goal_create(&tool_call.arguments).await,
-                "goal_subgoal" => self.handle_goal_subgoal(&tool_call.arguments).await,
-                "goal_task" => self.handle_goal_task(&tool_call.arguments).await,
-                "goal_list" => self.handle_goal_list().await,
-                "task" => {
-                    self.handle_task_tool(&tool_call.arguments).await
-                }
-                "plan_mode" => {
-                    self.handle_plan_mode(&tool_call.arguments).await
-                }
-                "perm" => {
-                    self.handle_perm(&tool_call.arguments).await
-                }
-                "web_search" => {
-                    let query = tool_call.arguments["query"].as_str().unwrap_or("");
-                    let engine = tool_call.arguments["engine"].as_str().unwrap_or("duckduckgo");
-                    let url = format!("https://www.google.com/search?q={}", urlencoding::encode(query));
-                    Ok(format!("{}\n\nWeb search ({}) for '{}': {}", response, engine, query, url))
-                }
-                // ── Legacy openAssistant tools ──
-                "shell" => {
-                    let result = crate::tools::shell::execute(&tool_call.arguments).await?;
-                    Ok(format!("{}\n\nShell output:\n{}", response, result.output))
-                }
-                "file" => {
-                    let result = crate::tools::file::execute(&tool_call.arguments).await?;
-                    Ok(format!("{}\n\nFile result:\n{}", response, result.output))
-                }
-                "browser" => {
-                    let result = crate::tools::browser::execute(&tool_call.arguments).await?;
-                    Ok(format!("{}\n\nBrowser result:\n{}", response, result.output))
-                }
-                "vision" => {
-                    let result = crate::tools::vision::execute(&tool_call.arguments).await?;
-                    Ok(format!("{}\n\nVision result:\n{}", response, result.output))
-                }
-                "memory" => {
-                    self.handle_memory_tool(&tool_call.arguments, mem).await
-                }
-                "self_manage" => {
-                    self.handle_self_manage(&tool_call.arguments, mem, ctx).await
-                }
-                _ => {
-                    tracing::warn!("Unknown tool: {}", tool_call.name);
-                    Ok(response)
+        // Route to appropriate handler
+        match tool_call.name.as_str() {
+            // ── Claude Code core tools ──
+            "bash" => {
+                let result = crate::tools::bash::execute(&tool_call.arguments).await?;
+                if result.exit_code == 0 && !result.timed_out {
+                    Ok(format!("Bash output:\n{}", result.output))
+                } else if result.timed_out {
+                    Ok(format!("Bash timed out:\n{}", result.output))
+                } else {
+                    Ok(format!("Bash failed (exit {}):\n{}", result.exit_code, result.output))
                 }
             }
-        } else {
-            Ok(response)
+            "read" => {
+                let result = crate::tools::file::execute(&serde_json::json!({
+                    "action": "read",
+                    "path": tool_call.arguments["path"].as_str().unwrap_or("")
+                })).await?;
+                Ok(format!("File content:\n{}", result.output))
+            }
+            "write" => {
+                let result = crate::tools::file::execute(&serde_json::json!({
+                    "action": "write",
+                    "path": tool_call.arguments["path"].as_str().unwrap_or(""),
+                    "content": tool_call.arguments["content"].as_str().unwrap_or("")
+                })).await?;
+                Ok(format!("Write result:\n{}", result.output))
+            }
+            "edit" => {
+                let path = tool_call.arguments["path"].as_str().unwrap_or("");
+                let old = tool_call.arguments["old_string"].as_str().unwrap_or("");
+                let new = tool_call.arguments["new_string"].as_str().unwrap_or("");
+                // Read file, replace, write back
+                let read_result = crate::tools::file::execute(&serde_json::json!({
+                    "action": "read", "path": path
+                })).await?;
+                if read_result.success {
+                    let content = &read_result.output;
+                    if content.contains(old) {
+                        let replaced = content.replace(old, new);
+                        let write_result = crate::tools::file::execute(&serde_json::json!({
+                            "action": "write", "path": path, "content": replaced
+                        })).await?;
+                        Ok(format!("Edit result: {}", write_result.output))
+                    } else {
+                        Ok(format!("Edit error: old_string not found in {}", path))
+                    }
+                } else {
+                    Ok(format!("Edit error: could not read {}", path))
+                }
+            }
+            "glob" => {
+                let result = crate::tools::file_search::glob(&tool_call.arguments).await?;
+                let files: Vec<String> = result.files.clone();
+                Ok(format!("Glob results ({} files):\n{}", result.total_found, files.join("\n")))
+            }
+            "grep" => {
+                let result = crate::tools::file_search::grep(&tool_call.arguments).await?;
+                let mut output = format!("Grep results ({} matches in {} files):\n", result.total_matches, result.files_searched);
+                for m in &result.matches {
+                    output.push_str(&format!("  {}:{}: {}\n", m.file, m.line_number, m.line));
+                }
+                Ok(output)
+            }
+            "todo_write" => {
+                self.handle_todo_write(&tool_call.arguments).await
+            }
+            "goal_deliberate" => {
+                self.handle_goal_deliberate(&tool_call.arguments).await
+            }
+            "claude" => self.handle_claude(&tool_call.arguments).await,
+            "goal_create" => self.handle_goal_create(&tool_call.arguments).await,
+            "goal_subgoal" => self.handle_goal_subgoal(&tool_call.arguments).await,
+            "goal_task" => self.handle_goal_task(&tool_call.arguments).await,
+            "goal_list" => self.handle_goal_list().await,
+            "task" => {
+                self.handle_task_tool(&tool_call.arguments).await
+            }
+            "plan_mode" => {
+                self.handle_plan_mode(&tool_call.arguments).await
+            }
+            "perm" => {
+                self.handle_perm(&tool_call.arguments).await
+            }
+            "web_search" => {
+                let query = tool_call.arguments["query"].as_str().unwrap_or("");
+                if query.is_empty() {
+                    return Ok("web_search: missing 'query' argument.".to_string());
+                }
+                let engine = tool_call.arguments["engine"].as_str().unwrap_or("duckduckgo");
+                let ws = crate::core::web_search::WebSearch::default();
+                match ws.search_with(engine, query).await {
+                    Ok(results) if results.is_empty() => {
+                        Ok(format!("Web search ({}): no results for '{}'.", engine, query))
+                    }
+                    Ok(results) => {
+                        let mut out = format!("Web search results for '{}':\n", query);
+                        for r in results.iter().take(5) {
+                            out.push_str(&format!("- {} — {}\n  {}\n", r.title, r.url, r.snippet));
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Ok(format!("Web search failed ({}): {}", engine, e)),
+                }
+            }
+            // ── Legacy openAssistant tools ──
+            "shell" => {
+                let result = crate::tools::shell::execute(&tool_call.arguments).await?;
+                Ok(format!("Shell output:\n{}", result.output))
+            }
+            "file" => {
+                let result = crate::tools::file::execute(&tool_call.arguments).await?;
+                Ok(format!("File result:\n{}", result.output))
+            }
+            "browser" => {
+                let result = crate::tools::browser::execute(&tool_call.arguments).await?;
+                Ok(format!("Browser result:\n{}", result.output))
+            }
+            "vision" => {
+                let result = crate::tools::vision::execute(&tool_call.arguments).await?;
+                Ok(format!("Vision result:\n{}", result.output))
+            }
+            "memory" => {
+                self.handle_memory_tool(&tool_call.arguments, mem).await
+            }
+            "self_manage" => {
+                self.handle_self_manage(&tool_call.arguments, mem, ctx).await
+            }
+            _ => {
+                tracing::warn!("Unknown tool: {}", tool_call.name);
+                Ok(format!("Unknown tool '{}'. Available tools are listed in the system prompt.", tool_call.name))
+            }
         }
     }
 
@@ -461,33 +599,56 @@ impl Agent {
         Ok(store.format())
     }
 
+    /// Restrict the default tool set to an allowlist (sub-agent tool scoping).
+    fn filtered_tools(allowed: &[String]) -> Vec<ToolDefinition> {
+        let mut tools: Vec<ToolDefinition> = Self::default_tools()
+            .into_iter()
+            .filter(|t| allowed.iter().any(|a| a == &t.name))
+            .collect();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
+    }
+
     async fn handle_task_tool(&self, args: &serde_json::Value) -> Result<String> {
+        if self.depth >= 1 {
+            return Ok("Sub-agent refused: nested sub-agents are not allowed (depth limit 1).".to_string());
+        }
         let subagent_type = args["subagent_type"].as_str().unwrap_or("General");
         let description = args["description"].as_str().unwrap_or("");
         let prompt = args["prompt"].as_str().unwrap_or("");
+        if prompt.is_empty() {
+            return Ok("task: missing 'prompt' argument.".to_string());
+        }
 
-        let tools = args["tools"].as_array()
+        let tools: Vec<String> = args["tools"].as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
             .unwrap_or_else(|| vec!["read".to_string(), "glob".to_string(), "grep".to_string()]);
 
         let role_desc = match subagent_type {
-            "Explore" => "fast agent specialized for exploring codebases. Use for finding files, searching code, and understanding project structure.",
-            "Plan" => "agent specialized for planning and design. Use for creating implementation plans, designing architectures, and breaking down complex tasks.",
-            _ => "general-purpose agent for complex tasks. Use for multi-step work that requires reasoning and tool use.",
+            "Explore" => "fast agent specialized for exploring codebases: finding files, searching code, understanding project structure",
+            "Plan" => "agent specialized for planning and design: implementation plans, architectures, breaking down complex tasks",
+            _ => "general-purpose agent for multi-step work that requires reasoning and tool use",
         };
 
-        Ok(format!(
-            "🤖 Sub-Agent Task Spawned\n\
-            Type: {} ({})\n\
-            Description: {}\n\
-            Tools: {}\n\
-            \n\
-            Prompt:\n{}\n\
-            \n\
-            In a full implementation, this would spawn an isolated agent process\n\
-            with its own context, tool set, and conversation history.",
-            subagent_type, role_desc, description, tools.join(", "), prompt
-        ))
+        let mut child = Agent::new(self.model.clone())
+            .with_workspace(self.workspace_dir.clone())
+            .with_permission_mode(self.permission_mode);
+        child.depth = self.depth + 1;
+        child.tools = Self::filtered_tools(&tools);
+
+        let mut child_ctx = super::persona::FullContext::new();
+        let mut child_session = super::session::Session::new("subagent", "local");
+        let task_prompt = format!(
+            "You are a {role_desc}. Complete this task and report your findings as your final message.\n\
+             Task: {description}\n\n{prompt}"
+        );
+
+        // Box the recursive async call (process → execute_tool → here).
+        let result = Box::pin(child.process(&task_prompt, &mut child_ctx, &mut child_session)).await;
+        match result {
+            Ok(text) => Ok(format!("🤖 Sub-agent ({}) result:\n{}", subagent_type, text)),
+            Err(e) => Ok(format!("Sub-agent ({}) failed: {}", subagent_type, e)),
+        }
     }
 
     async fn handle_plan_mode(&self, args: &serde_json::Value) -> Result<String> {
@@ -768,6 +929,18 @@ fn push_str(buf: &mut String, s: &str) {
 /// engine, and goal deliberation — each passes its own (shared) `reqwest::Client`
 /// and the resolved provider credentials/model. Surfaces transport/HTTP errors
 /// instead of silently returning an empty string.
+/// Cap tool output before feeding it back into the context window.
+fn truncate_output(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…[truncated {} bytes]", &s[..end], s.len() - end)
+}
+
 pub(crate) async fn call_llm_raw(
     client: &reqwest::Client,
     api_base: &str,
@@ -810,4 +983,87 @@ pub(crate) async fn call_llm_raw(
         .as_str()
         .unwrap_or("")
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::permissions::{PermissionMode, PermissionRules};
+
+    #[test]
+    fn permission_key_wraps_shell_commands() {
+        let call = ToolCall { name: "bash".into(), arguments: serde_json::json!({"command": "git push"}) };
+        assert_eq!(Agent::permission_key(&call), "Bash(git push)");
+        let call = ToolCall { name: "shell".into(), arguments: serde_json::json!({"command": "ls"}) };
+        assert_eq!(Agent::permission_key(&call), "Bash(ls)");
+        let call = ToolCall { name: "read".into(), arguments: serde_json::json!({"path": "x"}) };
+        assert_eq!(Agent::permission_key(&call), "read");
+        // self_manage's run_command action embeds a shell command — it must be
+        // gated like bash, not like a benign self_manage call.
+        let call = ToolCall {
+            name: "self_manage".into(),
+            arguments: serde_json::json!({"action": "run_command", "command": "rm -rf /"}),
+        };
+        assert_eq!(Agent::permission_key(&call), "Bash(rm -rf /)");
+        let call = ToolCall { name: "self_manage".into(), arguments: serde_json::json!({"action": "list_skills"}) };
+        assert_eq!(Agent::permission_key(&call), "self_manage");
+    }
+
+    #[test]
+    fn deny_rule_on_raw_tool_name_blocks_shell_tools() {
+        // A user writing deny: ["shell"] expects the shell tool blocked even
+        // though its permission key is Bash(<command>).
+        let rules = PermissionRules { allow: vec![], ask: vec![], deny: vec!["shell".into()] };
+        let call = ToolCall { name: "shell".into(), arguments: serde_json::json!({"command": "ls"}) };
+        let agent = Agent::new("m");
+        assert!(agent.check_permission(&rules, &call).is_err());
+    }
+
+    #[test]
+    fn deny_rule_beats_bypass_mode() {
+        let rules = PermissionRules { allow: vec![], ask: vec![], deny: vec!["Bash(rm *)".into()] };
+        let call = ToolCall { name: "bash".into(), arguments: serde_json::json!({"command": "rm -rf /"}) };
+        let agent = Agent::new("m"); // default mode: BypassPermissions
+        assert!(agent.check_permission(&rules, &call).is_err());
+        let ok = ToolCall { name: "bash".into(), arguments: serde_json::json!({"command": "ls"}) };
+        assert!(agent.check_permission(&rules, &ok).is_ok());
+    }
+
+    #[test]
+    fn ask_resolves_to_refusal_headless() {
+        let rules = PermissionRules::default();
+        let agent = Agent::new("m").with_permission_mode(PermissionMode::Default);
+        let write = ToolCall { name: "write".into(), arguments: serde_json::json!({}) };
+        let err = agent.check_permission(&rules, &write).unwrap_err();
+        assert!(err.contains("approval"), "headless Ask must explain itself: {}", err);
+        let read = ToolCall { name: "read".into(), arguments: serde_json::json!({}) };
+        assert!(agent.check_permission(&rules, &read).is_ok());
+    }
+
+    #[test]
+    fn filtered_tools_keeps_only_requested() {
+        let names: Vec<String> = Agent::filtered_tools(&["read".into(), "grep".into(), "nonexistent".into()])
+            .iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["grep".to_string(), "read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn task_tool_refuses_nested_spawn() {
+        let mut agent = Agent::new("m");
+        agent.depth = 1;
+        let out = agent
+            .handle_task_tool(&serde_json::json!({"subagent_type": "Explore", "prompt": "x"}))
+            .await
+            .unwrap();
+        assert!(out.contains("depth"), "must refuse with a depth explanation: {}", out);
+    }
+
+    #[test]
+    fn truncate_output_respects_char_boundaries() {
+        assert_eq!(truncate_output("short", 100), "short");
+        let long = "é".repeat(100); // 2 bytes per char
+        let cut = truncate_output(&long, 51); // 51 is mid-char
+        assert!(cut.starts_with(&"é".repeat(25)));
+        assert!(cut.contains("truncated"));
+    }
 }
