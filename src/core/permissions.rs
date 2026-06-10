@@ -121,21 +121,27 @@ pub struct PermissionRules {
 }
 
 impl PermissionRules {
-    pub fn check(&self, tool: &str) -> PermissionAction {
+    /// Like `check`, but distinguishes "no rule matched" (None) from an
+    /// explicit Allow — callers can fall through to mode-based decisions.
+    pub fn check_explicit(&self, tool: &str) -> Option<PermissionAction> {
         // Deny takes highest priority
         if self.deny.iter().any(|d| Self::matches(tool, d)) {
-            return PermissionAction::Deny(format!("Tool '{}' is denied by settings", tool));
+            return Some(PermissionAction::Deny(format!("Tool '{}' is denied by settings", tool)));
         }
         // Then allow
         if self.allow.iter().any(|a| Self::matches(tool, a)) {
-            return PermissionAction::Allow;
+            return Some(PermissionAction::Allow);
         }
         // Then ask
         if self.ask.iter().any(|a| Self::matches(tool, a)) {
-            return PermissionAction::Ask(format!("Settings require approval for '{}'", tool));
+            return Some(PermissionAction::Ask(format!("Settings require approval for '{}'", tool)));
         }
+        None
+    }
+
+    pub fn check(&self, tool: &str) -> PermissionAction {
         // No rule — fall through to mode-based decision
-        PermissionAction::Allow
+        self.check_explicit(tool).unwrap_or(PermissionAction::Allow)
     }
 
     /// Match tool name against a rule (supports wildcards like "Bash(git *)")
@@ -143,9 +149,9 @@ impl PermissionRules {
         if rule == tool {
             return true;
         }
-        // Handle Bash prefix stripping
-        let tool_base = tool.strip_prefix("Bash(").unwrap_or(tool);
-        let rule_base = rule.strip_prefix("Bash(").unwrap_or(rule);
+        // Bash rules compare command text: "Bash(git push)" ⇄ "Bash(git *)"
+        let tool_base = tool.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')).unwrap_or(tool);
+        let rule_base = rule.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')).unwrap_or(rule);
         if tool_base == rule_base {
             return true;
         }
@@ -282,5 +288,23 @@ mod tests {
         assert!(PermissionRules::matches("Bash(git commit *)", "Bash(git commit *)"));
         assert!(PermissionRules::matches("Bash(git push)", "Bash(git *)"));
         assert!(PermissionRules::matches("Bash(npm run lint)", "Bash(npm run *)"));
+    }
+
+    #[test]
+    fn test_wildcard_matching_non_bash() {
+        assert!(PermissionRules::matches("mcp__github_search", "mcp__*"));
+        assert!(!PermissionRules::matches("web_search", "mcp__*"));
+    }
+
+    #[test]
+    fn test_check_explicit_distinguishes_no_rule_from_allow() {
+        let rules = PermissionRules {
+            allow: vec!["Read".into()],
+            ask: vec![],
+            deny: vec!["Bash(rm *)".into()],
+        };
+        assert!(matches!(rules.check_explicit("Read"), Some(PermissionAction::Allow)));
+        assert!(matches!(rules.check_explicit("Bash(rm -rf /tmp)"), Some(PermissionAction::Deny(_))));
+        assert!(rules.check_explicit("write").is_none(), "no rule => None, not Allow");
     }
 }
