@@ -295,7 +295,10 @@ async fn main() -> anyhow::Result<()> {
             ui::tui::run_tui().await?;
         }
         Commands::Web { port } => {
-            ui::web::run_web(port).await?;
+            // The `web` command IS the gateway WebChat (real agent loop) — the
+            // old simulated-response demo UI was removed.
+            let config = config::load().await?;
+            gateway::webchat::start_on(config, Some(port)).await?;
         }
         Commands::Agents { action, name } => {
             let config = config::load().await?;

@@ -3,7 +3,6 @@
 //! Provides both TUI (terminal) and Web UI interfaces
 
 pub mod tui;
-pub mod web;
 
 use crate::core::Message;
 use std::sync::Arc;
