@@ -46,6 +46,34 @@ pub async fn send_message(state: State<'_, AppCore>, message: String) -> Result<
     Ok(Message::assistant(reply))
 }
 
+/// Streaming variant of `send_message`: forwards every `AgentEvent` (tokens,
+/// tool steps, done/error) to the window as a `chat-event` Tauri event while
+/// the turn runs, and still resolves with the final assistant `Message` so
+/// callers without event support (mock mode) keep working.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_message_stream(
+    window: tauri::Window,
+    state: State<'_, AppCore>,
+    message: String,
+) -> Result<Message, String> {
+    use tauri::Emitter;
+    if message.trim().is_empty() {
+        return Err("Cannot send an empty message.".into());
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let forward = tauri::async_runtime::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let _ = window.emit("chat-event", &ev);
+        }
+    });
+
+    let mut turn = state.turn.lock().await;
+    let crate::state::Turn { agent, ctx, session } = &mut *turn;
+    let result = agent.process_events(&message, ctx, session, tx).await;
+    let _ = forward.await;
+    result.map(Message::assistant).map_err(|e| e.to_string())
+}
+
 /// Full transcript for hydrating the message list on load.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_history(state: State<'_, AppCore>) -> Result<Vec<Message>, String> {
