@@ -149,16 +149,16 @@ impl WatcherStore {
 
     /// Fetch every due watcher, update state, persist once, and return the
     /// changes (excluding first-fetch baselines). Fetch errors leave
-    /// `last_hash` untouched so an outage never reads as a change.
+    /// `last_hash` untouched so an outage never reads as a change. Each fetch
+    /// uses its own SSRF-hardened client (see `fetch_text`).
     pub async fn check_due(
         &mut self,
-        client: &reqwest::Client,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<WatcherChange>> {
         let mut changes = Vec::new();
         for i in self.due_indices(now) {
             let url = self.state.watchers[i].url.clone();
-            let body = match fetch_text(client, &url).await {
+            let body = match fetch_text(&url).await {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::warn!("watcher fetch failed for {}: {}", url, e);
@@ -190,23 +190,56 @@ impl WatcherStore {
     }
 }
 
-async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
-    // SSRF guard: watchers can be added by remote channel users, and the
-    // fetched content is LLM-summarized back to the channel — refuse
-    // loopback/private/link-local targets so the gateway can't be used to
-    // read internal services or cloud metadata endpoints. (DNS rebinding is
-    // out of scope for a personal assistant.)
+/// SSRF-hardened fetch. Watchers can be added by remote channel users and the
+/// fetched content is LLM-summarized back to the channel, so this must not be
+/// usable to read internal services or cloud metadata endpoints:
+/// - http/https schemes only;
+/// - the host string is checked (localhost / IP-literal ranges), then every
+///   DNS-resolved address is checked too (catches public hostnames pointing
+///   at internal IPs);
+/// - the connection is pinned to a validated resolved IP via
+///   `ClientBuilder::resolve`, so a DNS rebind between check and connect
+///   changes nothing;
+/// - redirects are not followed (a public URL could 302 to an internal one) —
+///   watch the final URL directly instead.
+async fn fetch_text(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url)?;
-    if is_internal_host(parsed.host_str().unwrap_or("")) {
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("only http(s) URLs can be watched");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL has no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if is_internal_host(&host) {
         anyhow::bail!("private/localhost URLs are not allowed for watchers");
     }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+    if addrs.is_empty() {
+        anyhow::bail!("DNS returned no addresses for {host}");
+    }
+    if addrs.iter().any(|a| is_internal_ip(&a.ip())) {
+        anyhow::bail!("URL resolves to a private/internal address");
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(&host, addrs[0])
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
     let resp = client
         .get(url)
-        .timeout(std::time::Duration::from_secs(15))
         .header("User-Agent", "openAssistant-watcher/0.1")
         .send()
         .await?;
     let status = resp.status();
+    if status.is_redirection() {
+        anyhow::bail!("redirects are not followed for watched URLs (HTTP {status}) — watch the final URL directly");
+    }
     if !status.is_success() {
         anyhow::bail!("HTTP {status}");
     }
@@ -219,31 +252,38 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
 
 /// True for hosts a watcher must not fetch: localhost, loopback, RFC1918
 /// private ranges, and link-local (incl. cloud metadata at 169.254.169.254).
+/// Hostname-only check — `fetch_text` additionally validates every resolved
+/// address with `is_internal_ip`.
 fn is_internal_host(host: &str) -> bool {
-    use std::net::IpAddr;
     if host.eq_ignore_ascii_case("localhost") || host.is_empty() {
         return true;
     }
     // Bracketed IPv6 hosts parse without the brackets.
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(a) => {
-                a.is_loopback()
-                    || a.is_private()
-                    || a.is_link_local()
-                    || a.is_unspecified()
-            }
-            IpAddr::V6(a) => {
-                a.is_loopback()
-                    || a.is_unspecified()
-                    // fe80::/10 link-local and fc00::/7 unique-local
-                    || (a.segments()[0] & 0xffc0) == 0xfe80
-                    || (a.segments()[0] & 0xfe00) == 0xfc00
-            }
-        };
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return is_internal_ip(&ip);
     }
     false
+}
+
+fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(a) => {
+            a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified()
+        }
+        IpAddr::V6(a) => {
+            // Also catch internal IPv4 addresses smuggled as v6-mapped (::ffff:10.0.0.1).
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return is_internal_ip(&IpAddr::V4(v4));
+            }
+            a.is_loopback()
+                || a.is_unspecified()
+                // fe80::/10 link-local and fc00::/7 unique-local
+                || (a.segments()[0] & 0xffc0) == 0xfe80
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
 }
 
 /// Collapse all whitespace runs so formatting/indentation churn doesn't read
@@ -312,6 +352,19 @@ mod tests {
         assert!(is_internal_host("[fe80::1]"));
         assert!(!is_internal_host("93.184.216.34"));
         assert!(!is_internal_host("example.com"));
+        // v4-mapped-in-v6 smuggling
+        assert!(is_internal_host("[::ffff:10.0.0.1]"));
+        assert!(is_internal_host("[::ffff:127.0.0.1]"));
+    }
+
+    #[tokio::test]
+    async fn fetch_text_rejects_bad_targets_before_any_network() {
+        // Non-http scheme.
+        assert!(fetch_text("ftp://example.com/x").await.is_err());
+        // Internal hosts bail before DNS/connect.
+        assert!(fetch_text("http://127.0.0.1/x").await.is_err());
+        assert!(fetch_text("http://169.254.169.254/latest/meta-data/").await.is_err());
+        assert!(fetch_text("http://localhost:8080/admin").await.is_err());
     }
 
     #[test]

@@ -16,7 +16,6 @@ use crate::core::brief;
 use crate::core::watchers::WatcherStore;
 
 pub async fn proactive_loop(initial: Config) {
-    let client = reqwest::Client::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     info!("Proactive loop running (daily brief + watchers).");
@@ -29,7 +28,7 @@ pub async fn proactive_loop(initial: Config) {
         };
 
         run_brief_step(&cfg).await;
-        run_watcher_step(&cfg, &client).await;
+        run_watcher_step(&cfg).await;
     }
 }
 
@@ -64,12 +63,12 @@ async fn run_brief_step(cfg: &Config) {
     }
 }
 
-async fn run_watcher_step(cfg: &Config, client: &reqwest::Client) {
+async fn run_watcher_step(cfg: &Config) {
     let mut store = WatcherStore::open(&cfg.general.data_dir);
     if store.state.watchers.is_empty() {
         return;
     }
-    let changes = match store.check_due(client, chrono::Utc::now()).await {
+    let changes = match store.check_due(chrono::Utc::now()).await {
         Ok(c) => c,
         Err(e) => {
             warn!("watcher check failed: {}", e);
