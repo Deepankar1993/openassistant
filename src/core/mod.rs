@@ -23,6 +23,8 @@ pub mod streaming;
 pub mod plugins;
 pub mod workflows;
 pub mod channels;
+pub mod watchers;
+pub mod brief;
 
 use serde::{Deserialize, Serialize};
 

@@ -84,6 +84,8 @@ impl PermissionMode {
             // mode, so they fire even here). Use Default mode to refuse shell
             // outright on headless channels.
             "bash" | "shell" => PermissionAction::Allow,
+            // Watchers only read public URLs + write their own state file.
+            "watch" | "web_search" => PermissionAction::Allow,
             _ => PermissionAction::Ask(format!("Allow tool '{}' to run?", tool)),
         }
     }
@@ -98,7 +100,7 @@ impl PermissionMode {
             // Bash: allow common dev commands, ask for dangerous ones
             "bash" | "shell" => PermissionAction::Allow, // Simplified — real classifier is more nuanced
             // Network: allow
-            "web_search" | "web_fetch" => PermissionAction::Allow,
+            "web_search" | "web_fetch" | "watch" => PermissionAction::Allow,
             // Default: ask
             _ => PermissionAction::Ask(format!("Auto-classifier: allow '{}'?", tool)),
         }

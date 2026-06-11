@@ -552,6 +552,7 @@ impl Agent {
                 let result = crate::tools::vision::execute(&tool_call.arguments).await?;
                 Ok(format!("Vision result:\n{}", result.output))
             }
+            "watch" => self.handle_watch(&tool_call.arguments).await,
             "memory" => {
                 self.handle_memory_tool(&tool_call.arguments, mem).await
             }
@@ -697,6 +698,42 @@ impl Agent {
     async fn handle_goal_list(&self) -> Result<String> {
         let store = super::goal_store::GoalStore::open_default()?;
         Ok(store.format())
+    }
+
+    /// Manage URL watchers (persisted in <data_dir>/proactive.json; checked by
+    /// the gateway's proactive loop, which posts change notifications).
+    async fn handle_watch(&self, args: &serde_json::Value) -> Result<String> {
+        let action = args["action"].as_str().unwrap_or("list");
+        let mut store = super::watchers::WatcherStore::open(&self.workspace_dir);
+        match action {
+            "add" => {
+                let url = args["url"].as_str().unwrap_or("").trim();
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Ok("watch add: provide an http(s) 'url'.".to_string());
+                }
+                let note = args["note"].as_str().unwrap_or("");
+                let interval = args["interval_minutes"].as_u64().unwrap_or(60);
+                let id = store.add(url, note, interval)?;
+                Ok(format!(
+                    "🔭 Watching {} every {}m [{}]. I'll post here when it changes (gateway must be running).",
+                    url,
+                    interval.max(super::watchers::MIN_INTERVAL_MINUTES),
+                    &id[..8]
+                ))
+            }
+            "remove" => {
+                let key = args["url"].as_str().or_else(|| args["id"].as_str()).unwrap_or("");
+                if key.is_empty() {
+                    return Ok("watch remove: provide 'url' or 'id'.".to_string());
+                }
+                if store.remove(key)? {
+                    Ok(format!("Stopped watching {}.", key))
+                } else {
+                    Ok(format!("No watcher matching '{}'. Use action=list.", key))
+                }
+            }
+            _ => Ok(store.format_list()),
+        }
     }
 
     /// One-line human summary of a tool call for the streaming tool timeline.
@@ -1028,6 +1065,11 @@ impl Agent {
                 parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}}}),
             },
             ToolDefinition {
+                name: "watch".to_string(),
+                description: "Watch a URL and get notified when it changes. Args: {\"action\": \"add|list|remove\", \"url\": \"https://...\", \"note\": \"why\", \"interval_minutes\": 60}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}, "url": {"type": "string"}, "note": {"type": "string"}, "interval_minutes": {"type": "integer"}}}),
+            },
+            ToolDefinition {
                 name: "web_search".to_string(),
                 description: "Multi-source web search. Args: {\"query\": \"...\", \"engine\": \"duckduckgo|brave|google\"}".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}, "engine": {"type": "string"}}}),
@@ -1311,6 +1353,35 @@ mod tests {
         assert_eq!(Agent::tool_summary(&call), "rust sse");
         let call = ToolCall { name: "goal_list".into(), arguments: serde_json::json!({}) };
         assert_eq!(Agent::tool_summary(&call), "{}");
+    }
+
+    #[tokio::test]
+    async fn watch_tool_add_list_remove_via_execute_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent = Agent::new("m").with_workspace(dir.path().to_str().unwrap().to_string());
+        let mut ctx = crate::core::persona::FullContext::new();
+        let mut session = crate::core::session::Session::new("test", "test");
+        let mem = crate::core::memory::MemoryWorkspace::from_data_dir(dir.path().to_str().unwrap());
+
+        let add = ToolCall {
+            name: "watch".into(),
+            arguments: serde_json::json!({"action": "add", "url": "https://example.com", "note": "demo", "interval_minutes": 15}),
+        };
+        let out = agent.execute_tool(&add, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("Watching https://example.com"), "{}", out);
+
+        let list = ToolCall { name: "watch".into(), arguments: serde_json::json!({"action": "list"}) };
+        let out = agent.execute_tool(&list, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("https://example.com") && out.contains("every 15m"), "{}", out);
+
+        let rm = ToolCall { name: "watch".into(), arguments: serde_json::json!({"action": "remove", "url": "https://example.com"}) };
+        let out = agent.execute_tool(&rm, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("Stopped watching"), "{}", out);
+
+        // Rejects non-http URLs.
+        let bad = ToolCall { name: "watch".into(), arguments: serde_json::json!({"action": "add", "url": "file:///etc/passwd"}) };
+        let out = agent.execute_tool(&bad, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("http(s)"), "{}", out);
     }
 
     #[test]

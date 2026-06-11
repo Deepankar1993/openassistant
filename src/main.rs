@@ -36,6 +36,9 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Generate the daily brief now and print it (scheduled delivery is the
+    /// gateway's proactive loop — config [brief]).
+    Brief,
     Onboard,
     Config {
         #[arg(long)] key: Option<String>,
@@ -293,6 +296,18 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Tui => {
             ui::tui::run_tui().await?;
+        }
+        Commands::Brief => {
+            let config = config::load().await?;
+            let store = open_assistant::core::watchers::WatcherStore::open(&config.general.data_dir);
+            let recent = open_assistant::core::brief::recent_watcher_summary(&store);
+            match open_assistant::core::brief::generate_brief(&config, &recent).await {
+                Ok(text) => println!("☀️ Daily brief\n\n{}", text),
+                Err(e) => {
+                    eprintln!("Could not generate the brief: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Web { port } => {
             // The `web` command IS the gateway WebChat (real agent loop) — the
