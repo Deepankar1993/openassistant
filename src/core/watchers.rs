@@ -191,6 +191,15 @@ impl WatcherStore {
 }
 
 async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    // SSRF guard: watchers can be added by remote channel users, and the
+    // fetched content is LLM-summarized back to the channel — refuse
+    // loopback/private/link-local targets so the gateway can't be used to
+    // read internal services or cloud metadata endpoints. (DNS rebinding is
+    // out of scope for a personal assistant.)
+    let parsed = reqwest::Url::parse(url)?;
+    if is_internal_host(parsed.host_str().unwrap_or("")) {
+        anyhow::bail!("private/localhost URLs are not allowed for watchers");
+    }
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(15))
@@ -201,8 +210,40 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
     if !status.is_success() {
         anyhow::bail!("HTTP {status}");
     }
-    let body = resp.text().await?;
-    Ok(body.chars().take(MAX_BODY_BYTES).collect())
+    // Enforce the byte cap on raw bytes (a char-based cap would let CJK
+    // pages use 4x the intended memory).
+    let bytes = resp.bytes().await?;
+    let truncated = &bytes[..bytes.len().min(MAX_BODY_BYTES)];
+    Ok(String::from_utf8_lossy(truncated).into_owned())
+}
+
+/// True for hosts a watcher must not fetch: localhost, loopback, RFC1918
+/// private ranges, and link-local (incl. cloud metadata at 169.254.169.254).
+fn is_internal_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    if host.eq_ignore_ascii_case("localhost") || host.is_empty() {
+        return true;
+    }
+    // Bracketed IPv6 hosts parse without the brackets.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(a) => {
+                a.is_loopback()
+                    || a.is_private()
+                    || a.is_link_local()
+                    || a.is_unspecified()
+            }
+            IpAddr::V6(a) => {
+                a.is_loopback()
+                    || a.is_unspecified()
+                    // fe80::/10 link-local and fc00::/7 unique-local
+                    || (a.segments()[0] & 0xffc0) == 0xfe80
+                    || (a.segments()[0] & 0xfe00) == 0xfc00
+            }
+        };
+    }
+    false
 }
 
 /// Collapse all whitespace runs so formatting/indentation churn doesn't read
@@ -256,6 +297,21 @@ mod tests {
         assert_eq!(a, b);
         let c = content_hash(&normalize_body("hello world bar"));
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn internal_hosts_are_rejected() {
+        assert!(is_internal_host("localhost"));
+        assert!(is_internal_host("127.0.0.1"));
+        assert!(is_internal_host("10.0.0.5"));
+        assert!(is_internal_host("172.16.0.1"));
+        assert!(is_internal_host("192.168.1.1"));
+        assert!(is_internal_host("169.254.169.254")); // cloud metadata
+        assert!(is_internal_host("0.0.0.0"));
+        assert!(is_internal_host("[::1]"));
+        assert!(is_internal_host("[fe80::1]"));
+        assert!(!is_internal_host("93.184.216.34"));
+        assert!(!is_internal_host("example.com"));
     }
 
     #[test]

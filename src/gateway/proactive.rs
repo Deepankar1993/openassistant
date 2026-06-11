@@ -50,6 +50,9 @@ async fn run_brief_step(cfg: &Config) {
             post_everywhere(cfg, &format!("☀️ Daily brief\n\n{}", text)).await;
             // Mark delivered only after a successful generation, so transient
             // LLM failures retry on the next tick instead of skipping a day.
+            // Caveat: two gateway instances against one data dir could each
+            // deliver once — but dual instances already double-answer every
+            // channel message, so that setup is unsupported anyway.
             let mut store = WatcherStore::open(&cfg.general.data_dir);
             store.state.last_brief_date = now_local.format("%Y-%m-%d").to_string();
             if let Err(e) = store.save() {
@@ -160,11 +163,14 @@ fn first_line(s: &str) -> &str {
 fn chunk_text(s: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut count = 0usize;
     for ch in s.chars() {
-        if cur.chars().count() >= max {
+        if count >= max {
             out.push(std::mem::take(&mut cur));
+            count = 0;
         }
         cur.push(ch);
+        count += 1;
     }
     if !cur.is_empty() {
         out.push(cur);
