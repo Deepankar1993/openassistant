@@ -125,6 +125,7 @@ pub async fn run_wizard() -> Result<()> {
         routing: crate::config::RoutingConfig::default(),
         claude: crate::config::ClaudeBridgeConfig::default(),
         permissions: crate::config::PermissionsConfig::default(),
+        brief: crate::config::BriefConfig::default(),
     };
 
     crate::config::save(&config).await?;

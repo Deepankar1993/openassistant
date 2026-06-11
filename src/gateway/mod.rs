@@ -1,6 +1,7 @@
 // src/gateway/mod.rs
 pub mod discord;
 pub mod discord_store;
+pub mod proactive;
 pub mod telegram;
 pub mod slack;
 pub mod webchat;
@@ -148,6 +149,13 @@ async fn run_all(config: Config) -> Result<()> {
     }
     if !config.gateway.slack_token.is_empty() || !config.gateway.slack_signing_secret.is_empty() {
         info!("Slack configured — Events endpoint will be served at POST /slack/events (requires a public URL).");
+    }
+
+    // Proactive loop (daily brief + watchers): cheap 60s tick that re-reads
+    // config, so brief.enabled / watcher edits apply without a restart.
+    {
+        let cfg = config.clone();
+        tokio::spawn(proactive::proactive_loop(cfg));
     }
 
     info!("Starting WebChat messaging server (real agent loop)...");

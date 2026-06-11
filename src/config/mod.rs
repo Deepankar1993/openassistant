@@ -31,6 +31,36 @@ pub struct Config {
     /// WebChat) the same way the claude bridge caps remote origins.
     #[serde(default)]
     pub permissions: PermissionsConfig,
+    /// Proactive daily brief: the assistant messages you first each morning
+    /// (Discord home channel and/or a Telegram chat) and posts URL-watcher
+    /// change notifications. The `brief` CLI command works regardless.
+    #[serde(default)]
+    pub brief: BriefConfig,
+}
+
+/// Daily-brief / proactive messaging settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefConfig {
+    /// Master switch for scheduled delivery (the gateway's proactive loop).
+    pub enabled: bool,
+    /// Local time of day to deliver, "HH:MM" 24h. Invalid values fall back to 08:00.
+    pub time: String,
+    /// Post to the Discord home channel (gateway.discord_home_channel) when set.
+    pub discord: bool,
+    /// Telegram chat id to post to; empty ⇒ skip Telegram.
+    pub telegram_chat_id: String,
+}
+
+impl Default for BriefConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            time: "08:00".to_string(),
+            discord: true,
+            telegram_chat_id: String::new(),
+        }
+    }
 }
 
 /// Configuration for the Claude Code CLI bridge.
@@ -340,6 +370,10 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid timeout '{}' (expected seconds)", value))?
         }
+        "brief.enabled" => config.brief.enabled = value.parse().unwrap_or(false),
+        "brief.time" => config.brief.time = value.to_string(),
+        "brief.discord" => config.brief.discord = value.parse().unwrap_or(true),
+        "brief.telegram_chat_id" => config.brief.telegram_chat_id = value.to_string(),
         "permissions.gateway_mode" => config.permissions.gateway_mode = value.to_string(),
         "permissions.allow" => config.permissions.allow = split_list(value),
         "permissions.ask" => config.permissions.ask = split_list(value),
@@ -528,6 +562,30 @@ vision:
 ";
         let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
         assert_eq!(cfg3.permissions.gateway_mode, "acceptEdits");
+    }
+
+    #[test]
+    fn brief_config_defaults_and_round_trip() {
+        let cfg = Config::default();
+        assert!(!cfg.brief.enabled);
+        assert_eq!(cfg.brief.time, "08:00");
+        assert!(cfg.brief.discord);
+        assert!(cfg.brief.telegram_chat_id.is_empty());
+
+        let mut cfg2 = Config::default();
+        cfg2.brief.enabled = true;
+        cfg2.brief.time = "07:30".into();
+        cfg2.brief.telegram_chat_id = "12345".into();
+        let yaml = serde_yaml::to_string(&cfg2).expect("serialize");
+        let back: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert!(back.brief.enabled);
+        assert_eq!(back.brief.time, "07:30");
+        assert_eq!(back.brief.telegram_chat_id, "12345");
+
+        // Legacy YAML without a `brief:` key still loads (serde default).
+        let legacy = "general:\n  data_dir: /tmp/oa\nmodel:\n  provider: openrouter\n  model: m\n  api_key: ''\n  api_base: https://x\ngateway:\n  discord_token: ''\n  discord_allowed_users: []\n  telegram_token: ''\n  slack_token: ''\n  slack_signing_secret: ''\n  webhook_port: 0\n  dm_policy: open\nmemory:\n  db_path: /tmp/oa/m.db\n  max_entries: 1\n  fts_enabled: false\nskills:\n  dirs: []\n  auto_create: false\nsecurity:\n  dm_pairing: false\n  allow_from: []\nvision:\n  provider: g\n  gemini_path: g\n";
+        let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
+        assert!(!cfg3.brief.enabled);
     }
 
     #[test]
