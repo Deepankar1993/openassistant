@@ -185,8 +185,14 @@ async fn chat_stream(
             .await
         {
             convo.messages.push(ChatMessage::new("assistant", reply));
-            persist_convo(&state.config, &convo.session);
         }
+        // Persist the turn (user message + any assistant reply, including a
+        // partial/errored one — the user's message is already in the session).
+        // Snapshot then drop the lock so the synchronous SQLite write stays off
+        // the turn's critical section.
+        let snapshot = convo.session.clone();
+        drop(guard);
+        persist_convo(&state.config, &snapshot);
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|ev| {
@@ -224,7 +230,10 @@ async fn send_message(
 
     let response = ChatMessage::new("assistant", reply);
     convo.messages.push(response.clone());
-    persist_convo(&state.config, &convo.session);
+    // Snapshot + drop the lock before the synchronous SQLite write.
+    let snapshot = convo.session.clone();
+    drop(guard);
+    persist_convo(&state.config, &snapshot);
     Json(response)
 }
 
@@ -307,10 +316,12 @@ async fn delete_conversation(
     State(state): State<GatewayState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
+    // Lock first, then delete inside the critical section: otherwise a turn
+    // racing between the delete and the lock would re-persist (un-delete) the row.
+    let mut guard = state.web.lock().await;
     if let Ok(store) = ConversationStore::open_default(&state.config.general.data_dir) {
         let _ = store.delete(&id);
     }
-    let mut guard = state.web.lock().await;
     if guard.session.id == id {
         *guard = Convo::new("webchat", "web", &state.config.general.data_dir);
     }
