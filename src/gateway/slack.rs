@@ -19,12 +19,16 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tracing::{debug, error, warn};
 
+use super::session_store::ChannelSessionStore;
 use super::webchat::{Convo, GatewayState};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Reject requests whose timestamp is older than this (replay protection).
 const MAX_SKEW_SECS: i64 = 60 * 5;
+
+/// Bound persisted session growth (Slack channels are long-lived).
+const MAX_SESSION_MESSAGES: usize = 40;
 
 pub async fn events_handler(
     State(state): State<GatewayState>,
@@ -75,19 +79,44 @@ pub async fn events_handler(
 
 async fn handle_message(state: GatewayState, channel: String, user: String, text: String) -> Result<()> {
     let data_dir = state.config.general.data_dir.clone();
+    // Opened per call: events may be handled concurrently, so each gets its own
+    // connection (best-effort — a failed open degrades to in-memory only).
+    let store = ChannelSessionStore::open_default(&data_dir).ok();
 
     // Take this channel's conversation OUT of the map, drop the guard before the
-    // agent await, then re-insert — never hold the lock across `process()`.
+    // agent await, then re-insert — never hold the lock across `process()`. On a
+    // cache miss, restore the persisted session before starting fresh.
     let mut convo = {
         let mut map = state.slack_sessions.lock().await;
-        map.remove(&channel)
-            .unwrap_or_else(|| Convo::new("slack", &user, &data_dir))
+        match map.remove(&channel) {
+            Some(c) => c,
+            None => {
+                let mut c = Convo::new("slack", &user, &data_dir);
+                if let Some(session) =
+                    store.as_ref().and_then(|s| s.load("slack", &channel).ok().flatten())
+                {
+                    c.session = session;
+                }
+                c
+            }
+        }
     };
 
     let reply = match state.agent.process(&text, &mut convo.ctx, &mut convo.session).await {
         Ok(r) => r,
         Err(e) => format!("⚠️ {}", e),
     };
+
+    // Bound session growth, then persist so it survives a restart.
+    let len = convo.session.messages.len();
+    if len > MAX_SESSION_MESSAGES {
+        convo.session.messages.drain(0..(len - MAX_SESSION_MESSAGES));
+    }
+    if let Some(store) = store.as_ref() {
+        if let Err(e) = store.save("slack", &channel, &convo.session) {
+            warn!("Slack: could not persist session for {}: {}", channel, e);
+        }
+    }
 
     {
         let mut map = state.slack_sessions.lock().await;
