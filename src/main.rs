@@ -39,6 +39,19 @@ enum Commands {
     /// Generate the daily brief now and print it (scheduled delivery is the
     /// gateway's proactive loop — config [brief]).
     Brief,
+    /// Manage scheduled jobs (cron.json). The gateway's proactive loop runs due
+    /// jobs and delivers results; `--action run` runs due jobs now.
+    Cron {
+        /// list | add | remove | run (default: list)
+        #[arg(long)] action: Option<String>,
+        #[arg(long)] name: Option<String>,
+        /// e.g. "every 60m", "every 2h", "every 1d"
+        #[arg(long)] schedule: Option<String>,
+        /// The prompt to run on schedule
+        #[arg(long)] task: Option<String>,
+        /// For remove: the job id (prefix ok)
+        #[arg(long)] id: Option<String>,
+    },
     /// Manage standing orders (persistent triggers in standing_orders.json).
     #[command(alias = "orders")]
     StandingOrders {
@@ -316,6 +329,57 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     eprintln!("Could not generate the brief: {}", e);
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::Cron { action, name, schedule, task, id } => {
+            use open_assistant::cron::scheduler::CronScheduler;
+            let config = config::load().await?;
+            let dd = &config.general.data_dir;
+            let mut scheduler = CronScheduler::load(dd);
+            match action.as_deref().unwrap_or("list") {
+                "add" => match (name, schedule, task) {
+                    (Some(n), Some(s), Some(t)) => {
+                        let jid = scheduler.add_job(&n, &s, &t, None);
+                        scheduler.save(dd)?;
+                        println!("✅ Added cron job '{}' [{}] ({}).", n, &jid[..8.min(jid.len())], s);
+                    }
+                    _ => println!("add requires --name, --schedule (e.g. \"every 60m\"), and --task."),
+                },
+                "remove" => match id {
+                    Some(i) if scheduler.remove_job(&i) => {
+                        scheduler.save(dd)?;
+                        println!("Removed cron job {}.", i);
+                    }
+                    _ => println!("No cron job with that id (see `cron --action list`)."),
+                },
+                "run" => {
+                    let due = scheduler.take_due(chrono::Utc::now());
+                    scheduler.save(dd)?;
+                    if due.is_empty() {
+                        println!("No cron jobs are due right now.");
+                    }
+                    for job in due {
+                        println!("⏰ Running '{}'…", job.name);
+                        let agent = open_assistant::core::agent::Agent::new(config.model.model.clone())
+                            .with_workspace(dd.clone())
+                            .with_tools_enabled(config.tools.enabled);
+                        let mut jctx = open_assistant::core::persona::FullContext::new();
+                        let mut jsession = open_assistant::core::session::Session::new("cron", "cli");
+                        match agent.process(&job.task, &mut jctx, &mut jsession).await {
+                            Ok(r) => println!("{}\n", r),
+                            Err(e) => println!("⚠️ {}\n", e),
+                        }
+                    }
+                }
+                _ => {
+                    let jobs = scheduler.list_jobs();
+                    if jobs.is_empty() {
+                        println!("No cron jobs. Add one with `cron --action add --name … --schedule \"every 60m\" --task \"…\"`.");
+                    }
+                    for j in jobs {
+                        println!("[{}] {} — {} (enabled={}, runs={}) :: {}", &j.id[..8.min(j.id.len())], j.name, j.schedule, j.enabled, j.run_count, j.task);
+                    }
                 }
             }
         }
