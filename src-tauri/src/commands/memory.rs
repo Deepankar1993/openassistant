@@ -4,7 +4,7 @@
 
 use open_assistant::config;
 use open_assistant::core::memory::MemoryWorkspace;
-use open_assistant::memory::store::{MemoryEntry, MemoryStore};
+use open_assistant::memory::store::{fact_key, MemoryEntry, MemoryStore};
 
 async fn workspace() -> Result<MemoryWorkspace, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
@@ -14,18 +14,6 @@ async fn workspace() -> Result<MemoryWorkspace, String> {
 async fn facts_store() -> Result<MemoryStore, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     MemoryStore::open_in(&cfg.general.data_dir).map_err(|e| e.to_string())
-}
-
-fn slug_key(value: &str) -> String {
-    let slug: String = value
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("-");
-    if slug.is_empty() { "fact".to_string() } else { slug.chars().take(48).collect() }
 }
 
 /// Long-term curated memory (`MEMORY.md`).
@@ -77,7 +65,7 @@ pub async fn add_user_fact(
         return Err("A fact can't be empty.".into());
     }
     let entry = MemoryEntry::new(
-        slug_key(&value),
+        fact_key(&value),
         value,
         category.unwrap_or_else(|| "fact".to_string()),
         "manual",

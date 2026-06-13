@@ -41,12 +41,15 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResultDto>, String> {
         Err(e) => out.push(result("Config", false, e.to_string(), false)),
     }
 
-    match MemoryStore::open_default().await {
+    // Load config first so the memory check reads the SAME db the agent and the
+    // facts panel use (open_in honors general.data_dir; open_default hardcodes
+    // ~/.openassistant).
+    let cfg = config::load().await.map_err(|e| e.to_string())?;
+    match MemoryStore::open_in(&cfg.general.data_dir) {
         Ok(_) => out.push(result("Memory database", true, "SQLite + FTS5 OK", false)),
         Err(e) => out.push(result("Memory database", false, e.to_string(), false)),
     }
 
-    let cfg = config::load().await.map_err(|e| e.to_string())?;
     match MemoryWorkspace::from_data_dir(&cfg.general.data_dir).init() {
         Ok(_) => out.push(result("Memory workspace", true, "Files initialized", false)),
         Err(e) => out.push(result("Memory workspace", false, e.to_string(), false)),

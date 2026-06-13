@@ -42,6 +42,26 @@ impl MemoryEntry {
     }
 }
 
+/// A short, human-readable key for a fact: the first few words of its value,
+/// lowercased and hyphenated. Shared by the agent's `remember` tool and the
+/// desktop fact commands so keys match across both (DRY — divergence would
+/// break forget-by-key for panel-added facts).
+pub fn fact_key(value: &str) -> String {
+    let slug: String = value
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "fact".to_string()
+    } else {
+        slug.chars().take(48).collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct MemoryStore {
     conn: Connection,
@@ -63,9 +83,19 @@ impl MemoryStore {
     pub async fn open(db_path: &str) -> Result<Self> {
         info!("Opening memory database: {}", db_path);
         let conn = Connection::open(db_path)?;
+        Self::configure(&conn)?;
         let store = Self { conn };
         store.init()?;
         Ok(store)
+    }
+
+    /// WAL + a busy timeout so the agent, the desktop fact commands, and
+    /// status polling — each its own connection — don't hit `SQLITE_BUSY`
+    /// when one writes while another reads. Matches the other stores.
+    fn configure(conn: &Connection) -> Result<()> {
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        Ok(())
     }
 
     /// Synchronous open at `<data_dir>/memory.db`. Used by the agent's sync
@@ -79,6 +109,7 @@ impl MemoryStore {
 
     pub fn open_sync(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+        Self::configure(&conn)?;
         let store = Self { conn };
         store.init()?;
         Ok(store)

@@ -219,8 +219,23 @@ impl Agent {
         // Learn from conversation
         ctx.observe(message);
 
-        // Build full system prompt with persona + user model + memory
-        let system_prompt = self.build_system_prompt(ctx, &mem);
+        // Load the durable "what I know about you" facts off the async thread
+        // (a sync SQLite open per turn would otherwise block the executor).
+        // Best-effort: a missing/locked store yields no facts.
+        let known_facts: Vec<String> = {
+            let dir = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::memory::store::MemoryStore::open_in(&dir)
+                    .and_then(|s| s.list_all(20))
+                    .map(|facts| facts.into_iter().map(|f| f.value).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        // Build full system prompt with persona + user model + memory + facts
+        let system_prompt = self.build_system_prompt(ctx, &mem, &known_facts);
 
         // Build conversation messages
         let messages = self.build_messages(&system_prompt, session);
@@ -309,7 +324,12 @@ impl Agent {
     }
 
     /// Build full system prompt with persona, user model, memory, and tool instructions
-    fn build_system_prompt(&self, ctx: &FullContext, mem: &super::memory::MemoryWorkspace) -> String {
+    fn build_system_prompt(
+        &self,
+        ctx: &FullContext,
+        mem: &super::memory::MemoryWorkspace,
+        known_facts: &[String],
+    ) -> String {
         let mut prompt = ctx.build_system_prompt();
 
         // Memory context
@@ -321,18 +341,14 @@ impl Agent {
         }
 
         // Durable, per-item facts about the user (the "what I know about you"
-        // store). Injected so the agent actually uses what it has remembered.
-        // Best-effort: a missing/locked store simply adds nothing.
-        if let Ok(store) = crate::memory::store::MemoryStore::open_in(&self.workspace_dir) {
-            if let Ok(facts) = store.list_all(20) {
-                if !facts.is_empty() {
-                    prompt.push_str("# What I know about you\n");
-                    for f in &facts {
-                        prompt.push_str(&format!("- {}\n", f.value));
-                    }
-                    prompt.push('\n');
-                }
+        // store), loaded off-thread by the caller and injected so the agent
+        // actually uses what it has remembered.
+        if !known_facts.is_empty() {
+            prompt.push_str("# What I know about you\n");
+            for value in known_facts {
+                prompt.push_str(&format!("- {}\n", value));
             }
+            prompt.push('\n');
         }
 
         // Tool instructions — only advertised when tool dispatch is enabled.
@@ -789,18 +805,30 @@ impl Agent {
             "list" => match store.list_all(50) {
                 Ok(facts) if facts.is_empty() => Ok("I don't have any saved facts yet.".to_string()),
                 Ok(facts) => {
-                    let mut out = String::from("What I remember about you:\n");
+                    let mut out = String::from("What I remember about you (forget by id or key):\n");
                     for f in &facts {
-                        out.push_str(&format!("- [{}] {} ({:.1})\n", f.key, f.value, f.importance));
+                        out.push_str(&format!(
+                            "- [id={} key={}] {} ({:.1})\n",
+                            f.id.unwrap_or(0), f.key, f.value, f.importance
+                        ));
                     }
                     Ok(out)
                 }
                 Err(e) => Ok(format!("remember list: {}", e)),
             },
             "forget" => {
+                // Prefer a precise id (from `list`); fall back to key. Note that
+                // key-based delete removes every fact sharing that derived key.
+                if let Some(id) = args["id"].as_i64() {
+                    return Ok(match store.delete_by_id(id) {
+                        Ok(0) => format!("No saved fact with id {}.", id),
+                        Ok(_) => format!("Forgot fact [id={}].", id),
+                        Err(e) => format!("remember forget: {}", e),
+                    });
+                }
                 let key = args["key"].as_str().unwrap_or("").trim();
                 if key.is_empty() {
-                    return Ok("remember forget: provide the 'key' of the fact to forget (see action=list).".to_string());
+                    return Ok("remember forget: provide an 'id' or 'key' to forget (see action=list).".to_string());
                 }
                 match store.delete(key) {
                     Ok(0) => Ok(format!("No saved fact with key '{}'.", key)),
@@ -1147,8 +1175,8 @@ impl Agent {
             },
             ToolDefinition {
                 name: "remember".to_string(),
-                description: "Save, list, or forget a durable fact about the user (persists across restarts; shown in their memory panel). Args: {\"action\": \"add|list|forget\", \"value\": \"the fact\", \"key\": \"<optional handle>\", \"category\": \"fact|preference\", \"importance\": 0.6}".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}, "value": {"type": "string"}, "key": {"type": "string"}, "category": {"type": "string"}, "importance": {"type": "number"}}}),
+                description: "Save, list, or forget a durable fact about the user (persists across restarts; shown in their memory panel). Args: {\"action\": \"add|list|forget\", \"value\": \"the fact\", \"key\": \"<optional handle>\", \"id\": <from list, for precise forget>, \"category\": \"fact|preference\", \"importance\": 0.6}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}, "value": {"type": "string"}, "key": {"type": "string"}, "id": {"type": "integer"}, "category": {"type": "string"}, "importance": {"type": "number"}}}),
             },
             ToolDefinition {
                 name: "web_search".to_string(),
@@ -1170,24 +1198,7 @@ fn push_str(buf: &mut String, s: &str) {
 /// engine, and goal deliberation — each passes its own (shared) `reqwest::Client`
 /// and the resolved provider credentials/model. Surfaces transport/HTTP errors
 /// instead of silently returning an empty string.
-/// A short, human-readable key for a remembered fact: the first few words of
-/// the value, lowercased and hyphenated. Used so `remember forget` has a handle
-/// without the model needing to track database ids.
-fn derive_fact_key(value: &str) -> String {
-    let slug: String = value
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("-");
-    if slug.is_empty() {
-        "fact".to_string()
-    } else {
-        slug.chars().take(48).collect()
-    }
-}
+use crate::memory::store::fact_key as derive_fact_key;
 
 /// Cap tool output before feeding it back into the context window.
 fn truncate_output(s: &str, max_bytes: usize) -> String {

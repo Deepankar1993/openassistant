@@ -186,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Model: {}", config.model.model);
             println!("Data dir: {}", config.general.data_dir);
 
-            let mem = open_assistant::memory::store::MemoryStore::open_default().await?;
+            let mem = open_assistant::memory::store::MemoryStore::open_in(&config.general.data_dir)?;
             match mem.count() {
                 Ok(c) => println!("Memory entries: {}", c),
                 Err(e) => println!("Memory: {}", e),
