@@ -94,6 +94,11 @@ async function installMock(page, opts = {}) {
           },
         ],
         agents: [],
+        facts: [
+          { id: 1, key: "name", value: "Prefers to be called by their first name.", category: "preference", source: "manual", created_at: "2026-06-01T10:00:00Z", updated_at: "2026-06-01T10:00:00Z", importance: 0.9 },
+          { id: 2, key: "work", value: "Works on a Rust desktop assistant project.", category: "fact", source: "chat", created_at: "2026-06-03T12:00:00Z", updated_at: "2026-06-03T12:00:00Z", importance: 0.6 },
+        ],
+        factSeq: 2,
       };
 
       window.__MOCK_BACKEND__ = async (cmd, args) => {
@@ -304,6 +309,41 @@ async function installMock(page, opts = {}) {
                 n.toLowerCase().includes(q) || e.toLowerCase().includes(q)
             );
           }
+
+          // ── User facts ──────────────────────────────────────────────────────
+          case "list_user_facts":
+            return mockState.facts
+              .slice()
+              .sort((a, b) => (b.importance || 0) - (a.importance || 0));
+
+          case "add_user_fact": {
+            const now = new Date().toISOString();
+            mockState.facts.push({
+              id: ++mockState.factSeq,
+              key: "",
+              value: args.value || "",
+              category: args.category || "fact",
+              source: "manual",
+              created_at: now,
+              updated_at: now,
+              importance: typeof args.importance === "number" ? args.importance : 0.6,
+            });
+            return null;
+          }
+
+          case "update_user_fact": {
+            const f = mockState.facts.find((x) => x.id === args.id);
+            if (f) {
+              if (args.value !== undefined && args.value !== null) f.value = args.value;
+              if (typeof args.importance === "number") f.importance = args.importance;
+              f.updated_at = new Date().toISOString();
+            }
+            return null;
+          }
+
+          case "delete_user_fact":
+            mockState.facts = mockState.facts.filter((x) => x.id !== args.id);
+            return null;
 
           // ── Skills ────────────────────────────────────────────────────────
           case "list_skills":
