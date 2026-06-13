@@ -69,16 +69,77 @@ impl StandingOrdersEngine {
         engine
     }
 
+    fn store_path(data_dir: &str) -> PathBuf {
+        PathBuf::from(data_dir).join("standing_orders.json")
+    }
+
+    /// Load from `<data_dir>/standing_orders.json`. If absent, seed the
+    /// defaults and persist them so the file becomes user-editable; a corrupt
+    /// file falls back to defaults (logged).
+    pub fn load(data_dir: &str) -> Self {
+        let path = Self::store_path(data_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str::<Vec<StandingOrder>>(&s) {
+                Ok(orders) => Self { orders },
+                Err(e) => {
+                    info!("standing_orders.json unreadable ({e}); using defaults");
+                    Self::new()
+                }
+            },
+            Err(_) => {
+                let engine = Self::new();
+                let _ = engine.save(data_dir);
+                engine
+            }
+        }
+    }
+
+    pub fn save(&self, data_dir: &str) -> Result<()> {
+        let path = Self::store_path(data_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&self.orders)?;
+        let tmp = tempfile::NamedTempFile::new_in(
+            path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+        )?;
+        std::fs::write(tmp.path(), json)?;
+        tmp.persist(&path)?;
+        Ok(())
+    }
+
+    /// Orders whose Keyword/EveryNMessages trigger fires for this message. The
+    /// caller executes each order's action (with origin gating). SessionEnd /
+    /// OnBoot / Schedule are not returned here.
+    pub fn matched(&self, message: &str, message_count: usize) -> Vec<StandingOrder> {
+        let msg_lower = message.to_lowercase();
+        self.orders
+            .iter()
+            .filter(|o| o.enabled)
+            .filter(|o| match &o.trigger {
+                OrderTrigger::Keyword { phrases } => {
+                    phrases.iter().any(|p| msg_lower.contains(&p.to_lowercase()))
+                }
+                OrderTrigger::EveryNMessages { count } => {
+                    *count > 0 && message_count > 0 && message_count % count == 0
+                }
+                _ => false,
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Add a standing order
     pub fn add(&mut self, order: StandingOrder) {
         info!("Added standing order: {}", order.name);
         self.orders.push(order);
     }
 
-    /// Remove a standing order
+    /// Remove a standing order by full id or id-prefix (so the truncated id
+    /// shown in `list` is enough to remove — matches the WatcherStore behavior).
     pub fn remove(&mut self, id: &str) -> bool {
         let before = self.orders.len();
-        self.orders.retain(|o| o.id != id);
+        self.orders.retain(|o| !(o.id == id || o.id.starts_with(id)));
         self.orders.len() < before
     }
 
@@ -149,8 +210,12 @@ impl StandingOrdersEngine {
         // Simple parsing: "When I mention X, do Y"
         let input_lower = input.to_lowercase();
 
-        if input_lower.starts_with("when i mention") {
-            let rest = input.trim_start_matches("when i mention").trim();
+        const PREFIX: &str = "when i mention";
+        if input_lower.starts_with(PREFIX) {
+            // Slice the ORIGINAL (case-preserving) input by the prefix's byte
+            // length — `input.trim_start_matches(PREFIX)` would no-op on the
+            // title-cased "When I mention…" and silently fail the parse.
+            let rest = input[PREFIX.len()..].trim();
             let parts: Vec<&str> = rest.split(", then ").collect();
             if parts.len() == 2 {
                 let phrases: Vec<String> = parts[0].split(" or ")
@@ -227,6 +292,106 @@ impl StandingOrdersEngine {
             },
             description: "Track project mentions across sessions".to_string(),
         });
+    }
+}
+
+/// Render a SaveNote/InjectContext template: substitutes `{{message}}` and
+/// `{{message_count}}`.
+pub fn render_template(template: &str, message: &str, message_count: usize) -> String {
+    template
+        .replace("{{message}}", message)
+        .replace("{{message_count}}", &message_count.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_template_substitutes_placeholders() {
+        assert_eq!(render_template("pref: {{message}}", "I like tea", 3), "pref: I like tea");
+        assert_eq!(render_template("{{message_count}} msgs", "x", 7), "7 msgs");
+        assert_eq!(render_template("none", "x", 1), "none");
+        assert_eq!(render_template("{{message}}/{{message}}", "a", 1), "a/a");
+    }
+
+    #[test]
+    fn matched_respects_triggers_and_enabled() {
+        let mut e = StandingOrdersEngine::default();
+        e.add(StandingOrder {
+            id: "k".into(), name: "kw".into(), enabled: true,
+            trigger: OrderTrigger::Keyword { phrases: vec!["Deploy".into()] },
+            action: OrderAction::InjectContext { text: "ctx".into() },
+            description: String::new(),
+        });
+        e.add(StandingOrder {
+            id: "n".into(), name: "every3".into(), enabled: true,
+            trigger: OrderTrigger::EveryNMessages { count: 3 },
+            action: OrderAction::InjectContext { text: "tick".into() },
+            description: String::new(),
+        });
+        e.add(StandingOrder {
+            id: "d".into(), name: "disabled".into(), enabled: false,
+            trigger: OrderTrigger::Keyword { phrases: vec!["deploy".into()] },
+            action: OrderAction::InjectContext { text: "no".into() },
+            description: String::new(),
+        });
+        e.add(StandingOrder {
+            id: "s".into(), name: "end".into(), enabled: true,
+            trigger: OrderTrigger::SessionEnd,
+            action: OrderAction::SaveNote { template: "t".into() },
+            description: String::new(),
+        });
+
+        // Keyword is case-insensitive; disabled order excluded; SessionEnd never matched here.
+        let m = e.matched("please DEPLOY now", 1);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].id, "k");
+        // EveryNMessages: fires at multiples of 3.
+        assert!(e.matched("no keyword", 3).iter().any(|o| o.id == "n"));
+        assert!(!e.matched("no keyword", 4).iter().any(|o| o.id == "n"));
+        // SessionEnd surfaced only via check_session_end.
+        assert_eq!(e.check_session_end().len(), 1);
+    }
+
+    #[test]
+    fn parse_from_text_handles_title_case_and_remove_by_prefix() {
+        // Title-cased input (as in the CLI help) must still parse.
+        let order = StandingOrdersEngine::parse_from_text("When I mention deploy, then remember it")
+            .expect("title-cased input parses");
+        match &order.trigger {
+            OrderTrigger::Keyword { phrases } => assert_eq!(phrases, &vec!["deploy".to_string()]),
+            t => panic!("expected Keyword, got {:?}", t),
+        }
+        // remove() accepts the id prefix shown by `list`.
+        let mut e = StandingOrdersEngine::default();
+        let id = order.id.clone();
+        e.add(order);
+        assert!(e.remove(&id[..8]), "remove by 8-char prefix works");
+        assert!(e.list().is_empty());
+    }
+
+    #[test]
+    fn load_seeds_defaults_then_round_trips_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap();
+        // First load with no file → seeds defaults and writes the file.
+        let e1 = StandingOrdersEngine::load(dd);
+        assert!(!e1.list().is_empty(), "defaults seeded");
+        assert!(dir.path().join("standing_orders.json").exists(), "persisted");
+
+        // Save a custom set, reload, confirm it round-trips.
+        let mut e2 = StandingOrdersEngine::default();
+        e2.add(StandingOrder {
+            id: "only".into(), name: "only".into(), enabled: true,
+            trigger: OrderTrigger::Keyword { phrases: vec!["x".into()] },
+            action: OrderAction::InjectContext { text: "y".into() },
+            description: String::new(),
+        });
+        e2.save(dd).unwrap();
+        let e3 = StandingOrdersEngine::load(dd);
+        assert_eq!(e3.list().len(), 1);
+        assert_eq!(e3.list()[0].id, "only");
     }
 }
 

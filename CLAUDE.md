@@ -70,6 +70,15 @@ the tool if it times out or fails to spawn (fail-closed for security hooks; defa
 fail-open). The engine load is done via `spawn_blocking` (sync fs read off the async
 thread).
 
+**Standing orders fire in the loop too.** `process_inner` loads
+`StandingOrdersEngine` (`src/core/standing_orders.rs`, persisted at
+`<data_dir>/standing_orders.json`, seeded with defaults) and applies orders whose
+Keyword/EveryNMessages trigger matches: `InjectContext` → a `# Standing context` prompt
+section; `SaveNote` → a rendered daily-memory note; `RunCommand`/`Webhook` → executed
+only for `operator` (else skipped); `RunTool`/`RunSkill`/`SendMessage` → logged no-ops
+(v1). `SessionEnd` orders run at the Stop point. Manage via `openassistant
+standing-orders` (alias `orders`) `--action list|add|remove`.
+
 **Permissions are enforced in the loop (origin-aware).** `Agent.permission_mode` defaults to `BypassPermissions` for local front-ends (TUI/desktop keep full autonomy once tools are enabled); gateway channels construct agents with `permissions.gateway_mode` from config (default `acceptEdits`). Config `[permissions]` `allow`/`ask`/`deny` rules (Claude-Code-style, incl. `Bash(git *)` wildcards) apply at **every** mode — deny beats bypass; `Ask` resolves to a refusal text returned to the model (the agent is headless). The `task` tool spawns a real in-process sub-agent with a scoped tool list and depth limit 1.
 
 ### Context assembled into every prompt (`src/core/persona.rs`)
