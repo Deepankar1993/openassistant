@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::persona::{FullContext, Persona};
 use crate::core::session::Session;
+use crate::gateway::session_store::ChannelSessionStore;
 
 struct Convo {
     ctx: FullContext,
@@ -49,6 +50,16 @@ pub async fn start(config: Config) -> Result<()> {
         Err(e) => anyhow::bail!("Telegram getMe request failed: {}", e),
     }
 
+    // Persisted per-chat sessions survive restarts (best-effort: a failed open
+    // degrades to in-memory only).
+    let store = match ChannelSessionStore::open_default(&data_dir) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!("Telegram: could not open session store ({}); sessions won't persist", e);
+            None
+        }
+    };
+
     let mut sessions: HashMap<i64, Convo> = HashMap::new();
     let mut offset: i64 = 0;
 
@@ -79,13 +90,16 @@ pub async fn start(config: Config) -> Result<()> {
             let chat_id = message["chat"]["id"].as_i64();
             let (Some(chat_id), false) = (chat_id, text.is_empty()) else { continue };
 
-            let convo = sessions.entry(chat_id).or_insert_with(|| Convo {
-                ctx: {
-                    let mut c = FullContext::new();
-                    c.persona = Persona::load_or_default(&data_dir);
-                    c
-                },
-                session: Session::new("telegram", chat_id.to_string()),
+            // On the first message for this chat after (re)start, restore the
+            // persisted session if there is one, else start fresh.
+            let convo = sessions.entry(chat_id).or_insert_with(|| {
+                let session = store
+                    .as_ref()
+                    .and_then(|s| s.load("telegram", &chat_id.to_string()).ok().flatten())
+                    .unwrap_or_else(|| Session::new("telegram", chat_id.to_string()));
+                let mut ctx = FullContext::new();
+                ctx.persona = Persona::load_or_default(&data_dir);
+                Convo { ctx, session }
             });
 
             let reply = match agent.process(&text, &mut convo.ctx, &mut convo.session).await {
@@ -97,6 +111,13 @@ pub async fn start(config: Config) -> Result<()> {
             let len = convo.session.messages.len();
             if len > MAX_SESSION_MESSAGES {
                 convo.session.messages.drain(0..(len - MAX_SESSION_MESSAGES));
+            }
+
+            // Persist the (bounded) session so it survives a restart.
+            if let Some(store) = store.as_ref() {
+                if let Err(e) = store.save("telegram", &chat_id.to_string(), &convo.session) {
+                    warn!("Telegram: could not persist session for chat {}: {}", chat_id, e);
+                }
             }
 
             if let Err(e) = send_message(&client, &api, chat_id, &reply).await {

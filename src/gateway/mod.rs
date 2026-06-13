@@ -2,6 +2,7 @@
 pub mod discord;
 pub mod discord_store;
 pub mod proactive;
+pub mod session_store;
 pub mod telegram;
 pub mod slack;
 pub mod webchat;
