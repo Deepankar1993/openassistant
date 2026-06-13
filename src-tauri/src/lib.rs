@@ -43,9 +43,11 @@ fn build_core() -> AppCore {
     let cfg = tauri::async_runtime::block_on(open_assistant::config::load()).unwrap_or_default();
     let data_dir = cfg.general.data_dir.clone();
     let persona = open_assistant::core::persona::Persona::load_or_default(&data_dir);
+    // The desktop app is the trusted local operator → lifecycle hooks may fire.
     let agent = Agent::new(cfg.model.model)
         .with_workspace(data_dir)
-        .with_tools_enabled(cfg.tools.enabled);
+        .with_tools_enabled(cfg.tools.enabled)
+        .operator();
     AppCore::new(agent, persona)
 }
 

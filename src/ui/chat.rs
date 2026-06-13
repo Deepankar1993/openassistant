@@ -15,7 +15,8 @@ pub async fn run_chat() -> Result<()> {
     println!("Type your message. Commands: /help, /status, /memory, /skills, /exit");
     println!();
 
-    let agent = Agent::new(&config.model.model).with_workspace(&data_dir);
+    // Local CLI/TUI is the trusted operator → lifecycle hooks may fire.
+    let agent = Agent::new(&config.model.model).with_workspace(&data_dir).operator();
 
     // Initialize memory workspace
     let mem = crate::core::memory::MemoryWorkspace::from_data_dir(&data_dir);

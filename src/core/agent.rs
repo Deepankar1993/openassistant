@@ -29,6 +29,11 @@ pub struct Agent {
     /// Sub-agent nesting depth: 0 = top-level. Sub-agents get depth+1 and
     /// refuse to spawn further sub-agents.
     pub depth: u8,
+    /// True only for the trusted local operator (CLI/TUI/desktop). Gates
+    /// arbitrary-shell features like lifecycle hooks: a turn driven by a remote
+    /// channel (Discord/Telegram/Slack) must NEVER fire the host's shell hooks.
+    /// Default false (untrusted); local front-ends opt in via `.operator()`.
+    pub operator: bool,
 }
 
 /// Max LLM⇄tool rounds per user turn.
@@ -95,7 +100,16 @@ impl Agent {
             tools_enabled: true,
             permission_mode: super::permissions::PermissionMode::BypassPermissions,
             depth: 0,
+            operator: false,
         }
+    }
+
+    /// Mark this agent as the trusted local operator — enables lifecycle hooks
+    /// (which run arbitrary shell). Called by the CLI/TUI/desktop front-ends;
+    /// never by the gateway channels.
+    pub fn operator(mut self) -> Self {
+        self.operator = true;
+        self
     }
 
     pub fn with_workspace(mut self, dir: impl Into<String>) -> Self {
@@ -209,12 +223,34 @@ impl Agent {
     ) -> Result<String> {
         info!("Processing: {}", &message[..message.len().min(80)]);
 
+        // Lifecycle hooks for this turn (operator only; None ⇒ no-op, no shell
+        // runs — a remote-channel turn must never trigger the host's hooks).
+        // Loaded off the async thread (sync fs read), like the facts injection.
+        let hooks = {
+            let operator = self.operator;
+            let ws = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || Self::load_hooks_for(operator, &ws))
+                .await
+                .unwrap_or(None)
+        };
+        let first_turn = session.messages().is_empty();
+
         // Add daily note about this interaction
         let mem = super::memory::MemoryWorkspace::from_data_dir(&self.workspace_dir);
         let _ = mem.append_daily(&format!("User said: {}", &message[..message.len().min(200)]));
 
         // Add user message to session
         session.add_message(Message::user(message));
+
+        // SessionStart (first turn of the session) + UserPromptSubmit hooks.
+        if first_turn {
+            Self::fire_hook(&hooks, super::hooks::HookEvent::SessionStart, self.hook_ctx(session, "session_start")).await;
+        }
+        {
+            let mut hc = self.hook_ctx(session, "user_prompt_submit");
+            hc.user_message = Some(message.to_string());
+            Self::fire_hook(&hooks, super::hooks::HookEvent::UserPromptSubmit, hc).await;
+        }
 
         // Learn from conversation
         ctx.observe(message);
@@ -255,7 +291,7 @@ impl Agent {
                 deny: config.permissions.deny.clone(),
             };
             let mut iterations = 0;
-            while let Some(tool_call) = self.parse_tool_call(&response) {
+            while let Some(mut tool_call) = self.parse_tool_call(&response) {
                 // A closed event sink means the streaming client is gone
                 // (Stop pressed / tab closed). Abort the turn early so a
                 // long multi-tool run can't hold the conversation lock —
@@ -279,17 +315,52 @@ impl Agent {
                         summary: Self::tool_summary(&tool_call),
                     });
                 }
-                let mut ok = true;
-                let output = match self.check_permission(&rules, &tool_call) {
-                    Ok(()) => match self.execute_tool(&tool_call, ctx, session, &mem).await {
-                        Ok(out) => out,
-                        // Execution errors go back to the model as text so it
-                        // can recover; only transport/config errors from
-                        // call_llm abort the turn.
-                        Err(e) => { ok = false; format!("Tool '{}' failed: {}", tool_call.name, e) }
-                    },
-                    Err(denial) => { ok = false; denial }
+                // PreToolUse hooks may block the call or rewrite its arguments.
+                let pre = {
+                    let mut hc = self.hook_ctx(session, "pre_tool_use");
+                    hc.tool_name = Some(tool_call.name.clone());
+                    hc.tool_input = Some(tool_call.arguments.clone());
+                    decide_pre_tool(
+                        &Self::fire_hook(&hooks, super::hooks::HookEvent::PreToolUse, hc).await,
+                    )
                 };
+                if let Some(modified) = pre.modified_input.clone() {
+                    tool_call.arguments = modified;
+                }
+
+                let mut ok = true;
+                let output = if pre.blocked {
+                    ok = false;
+                    format!("⛔ {}", pre.reason)
+                } else {
+                    match self.check_permission(&rules, &tool_call) {
+                        Ok(()) => match self.execute_tool(&tool_call, ctx, session, &mem).await {
+                            Ok(out) => out,
+                            // Execution errors go back to the model as text so it
+                            // can recover; only transport/config errors from
+                            // call_llm abort the turn.
+                            Err(e) => { ok = false; format!("Tool '{}' failed: {}", tool_call.name, e) }
+                        },
+                        Err(denial) => { ok = false; denial }
+                    }
+                };
+
+                // PostToolUse / PostToolUseFailure hooks (observe the result).
+                {
+                    let mut hc = self.hook_ctx(
+                        session,
+                        if ok { "post_tool_use" } else { "post_tool_use_failure" },
+                    );
+                    hc.tool_name = Some(tool_call.name.clone());
+                    hc.tool_output = Some(output.clone());
+                    let ev = if ok {
+                        super::hooks::HookEvent::PostToolUse
+                    } else {
+                        super::hooks::HookEvent::PostToolUseFailure
+                    };
+                    Self::fire_hook(&hooks, ev, hc).await;
+                }
+
                 let output = truncate_output(&output, MAX_TOOL_OUTPUT_BYTES);
                 if let Some(tx) = events {
                     let _ = tx.send(AgentEvent::ToolEnd {
@@ -316,6 +387,13 @@ impl Agent {
 
         // Add assistant response to session
         session.add_message(Message::assistant(&final_response));
+
+        // Stop hook (end of turn).
+        {
+            let mut hc = self.hook_ctx(session, "stop");
+            hc.assistant_message = Some(final_response.clone());
+            Self::fire_hook(&hooks, super::hooks::HookEvent::Stop, hc).await;
+        }
 
         // Daily note about response
         let _ = mem.append_daily(&format!("Assistant responded: {}", &final_response[..final_response.len().min(200)]));
@@ -769,6 +847,45 @@ impl Agent {
         }
     }
 
+    /// Load lifecycle hooks for this turn — only for the trusted local
+    /// operator. Returns `None` for remote/gateway agents (so `fire_hook` is a
+    /// no-op and no shell runs). A missing hooks.json yields an empty engine.
+    /// Associated fn (owned args) so it can run inside `spawn_blocking`.
+    fn load_hooks_for(operator: bool, workspace_dir: &str) -> Option<super::hooks::HookEngine> {
+        if !operator {
+            return None;
+        }
+        super::hooks::HookEngine::load_from_workspace(workspace_dir).ok()
+    }
+
+    /// Build a `HookContext` for `session`/`event`; callers set the
+    /// tool/message fields they have.
+    fn hook_ctx(&self, session: &Session, event: &str) -> super::hooks::HookContext {
+        super::hooks::HookContext {
+            session_id: session.id.clone(),
+            workspace_dir: self.workspace_dir.clone(),
+            event: event.to_string(),
+            tool_name: None,
+            tool_input: None,
+            tool_output: None,
+            user_message: None,
+            assistant_message: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Fire an event if hooks are loaded (operator only); else a no-op.
+    async fn fire_hook(
+        engine: &Option<super::hooks::HookEngine>,
+        event: super::hooks::HookEvent,
+        ctx: super::hooks::HookContext,
+    ) -> Vec<super::hooks::HookResult> {
+        match engine {
+            Some(e) => e.fire(&event, &ctx).await,
+            None => Vec::new(),
+        }
+    }
+
     /// Durable, per-item facts about the user (the "what I know about you"
     /// store, surfaced in the desktop Memory panel and injected into the system
     /// prompt). Persisted in `<data_dir>/memory.db` via `MemoryStore`.
@@ -1200,6 +1317,43 @@ fn push_str(buf: &mut String, s: &str) {
 /// instead of silently returning an empty string.
 use crate::memory::store::fact_key as derive_fact_key;
 
+/// Outcome of the PreToolUse hooks for one tool call.
+#[derive(Debug, Default, PartialEq)]
+struct PreToolDecision {
+    blocked: bool,
+    /// Hook stderr/explanation when blocked.
+    reason: String,
+    /// Rewritten tool arguments (applied only when not blocked).
+    modified_input: Option<serde_json::Value>,
+}
+
+/// Reduce PreToolUse hook results to a single decision: any `block` wins
+/// (and short-circuits modify); otherwise the last `modified_input` applies.
+fn decide_pre_tool(results: &[super::hooks::HookResult]) -> PreToolDecision {
+    let mut decision = PreToolDecision::default();
+    for r in results {
+        if r.block {
+            decision.blocked = true;
+            // Prefer the hook's structured reason, then stderr, then a generic.
+            decision.reason = r
+                .block_reason
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    let e = r.stderr.trim();
+                    (!e.is_empty()).then(|| e.to_string())
+                })
+                .unwrap_or_else(|| "blocked by a PreToolUse hook".to_string());
+            decision.modified_input = None;
+            return decision;
+        }
+        if r.modified_input.is_some() {
+            decision.modified_input = r.modified_input.clone();
+        }
+    }
+    decision
+}
+
 /// Cap tool output before feeding it back into the context window.
 fn truncate_output(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -1533,6 +1687,90 @@ mod tests {
         let bad = ToolCall { name: "remember".into(), arguments: serde_json::json!({"action": "add"}) };
         let out = agent.execute_tool(&bad, &mut ctx, &mut session, &mem).await.unwrap();
         assert!(out.contains("provide a 'value'"), "{}", out);
+    }
+
+    fn hook_result(block: bool, modified: Option<serde_json::Value>, stderr: &str) -> crate::core::hooks::HookResult {
+        crate::core::hooks::HookResult {
+            hook_event: "pre_tool_use".into(),
+            command: "x".into(),
+            stdout: String::new(),
+            stderr: stderr.into(),
+            exit_code: 0,
+            duration_ms: 0,
+            block,
+            block_reason: None,
+            modified_input: modified,
+        }
+    }
+
+    #[test]
+    fn decide_pre_tool_block_wins_over_modify() {
+        let results = vec![
+            hook_result(false, Some(serde_json::json!({"command": "ls"})), ""),
+            hook_result(true, None, "not allowed"),
+        ];
+        let d = decide_pre_tool(&results);
+        assert!(d.blocked);
+        assert_eq!(d.reason, "not allowed");
+        assert!(d.modified_input.is_none(), "a block clears any pending modify");
+    }
+
+    #[test]
+    fn decide_pre_tool_applies_last_modify_when_not_blocked() {
+        let results = vec![
+            hook_result(false, Some(serde_json::json!({"command": "a"})), ""),
+            hook_result(false, Some(serde_json::json!({"command": "b"})), ""),
+        ];
+        let d = decide_pre_tool(&results);
+        assert!(!d.blocked);
+        assert_eq!(d.modified_input, Some(serde_json::json!({"command": "b"})));
+    }
+
+    #[test]
+    fn decide_pre_tool_empty_is_noop() {
+        let d = decide_pre_tool(&[]);
+        assert!(!d.blocked && d.modified_input.is_none());
+    }
+
+    #[test]
+    fn load_hooks_is_gated_on_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        // Non-operator (default, e.g. a gateway agent): no hook engine at all.
+        assert!(Agent::load_hooks_for(false, ws).is_none(), "remote agents must not load hooks");
+        // Operator: an engine is loaded (empty here — no hooks.json).
+        assert!(Agent::load_hooks_for(true, ws).is_some());
+        // The builder sets the flag the loader gates on.
+        assert!(Agent::new("m").operator().operator);
+        assert!(!Agent::new("m").operator);
+    }
+
+    #[tokio::test]
+    async fn hook_engine_fires_and_can_block() {
+        use crate::core::hooks::{HookContext, HookEngine, HookEvent};
+        // Skip where bash isn't available (the hook runner shells out to bash).
+        if std::process::Command::new("bash").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".claude/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("hooks.json"),
+            r#"[{"event":"pre_tool_use","command":"echo '{\"block\":true}'","description":"deny","enabled":true}]"#,
+        )
+        .unwrap();
+
+        let engine = HookEngine::load_from_workspace(dir.path().to_str().unwrap()).unwrap();
+        let ctx = HookContext {
+            session_id: "s".into(), workspace_dir: dir.path().to_string_lossy().into(),
+            event: "pre_tool_use".into(), tool_name: Some("bash".into()),
+            tool_input: None, tool_output: None, user_message: None,
+            assistant_message: None, timestamp: "t".into(),
+        };
+        let results = engine.fire(&HookEvent::PreToolUse, &ctx).await;
+        assert_eq!(results.len(), 1);
+        assert!(decide_pre_tool(&results).blocked, "the hook returned block:true");
     }
 
     #[test]

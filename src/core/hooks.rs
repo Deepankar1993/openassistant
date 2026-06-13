@@ -54,6 +54,21 @@ pub struct HookDefinition {
     /// Whether this hook is enabled
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// For PreToolUse security hooks: if the hook fails to spawn or times out,
+    /// treat that as a BLOCK rather than allowing the tool (fail-closed).
+    /// Default false (fail-open) for non-security hooks.
+    #[serde(default)]
+    pub fail_closed: bool,
+}
+
+/// The shell used to run hook commands, per platform. Hook authors write
+/// commands in this shell's syntax (PowerShell on Windows, bash elsewhere).
+pub(crate) fn hook_shell() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        ("powershell", "-Command")
+    } else {
+        ("bash", "-c")
+    }
 }
 
 fn default_enabled() -> bool {
@@ -87,6 +102,8 @@ pub struct HookResult {
     pub duration_ms: u64,
     /// If the hook wants to block a tool (PreToolUse only)
     pub block: bool,
+    /// Human-readable reason for a block (from the hook's `{"reason": ...}`).
+    pub block_reason: Option<String>,
     /// If the hook wants to modify the tool input
     pub modified_input: Option<serde_json::Value>,
 }
@@ -156,9 +173,10 @@ impl HookEngine {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(hook.timeout_seconds.unwrap_or(30));
 
-        // Build the command
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg("-c").arg(&hook.command);
+        // Build the command in the platform shell.
+        let (shell, flag) = hook_shell();
+        let mut cmd = tokio::process::Command::new(shell);
+        cmd.arg(flag).arg(&hook.command);
 
         // Set working directory
         if let Some(ref dir) = hook.working_dir {
@@ -192,6 +210,7 @@ impl HookEngine {
         }).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
+                // fail_closed hooks treat a spawn failure as a block.
                 return HookResult {
                     hook_event: format!("{:?}", hook.event),
                     command: hook.command.clone(),
@@ -199,7 +218,8 @@ impl HookEngine {
                     stderr: format!("Failed to execute hook: {}", e),
                     exit_code: -1,
                     duration_ms: start.elapsed().as_millis() as u64,
-                    block: false,
+                    block: hook.fail_closed,
+                    block_reason: hook.fail_closed.then(|| format!("hook failed to run: {}", e)),
                     modified_input: None,
                 };
             }
@@ -210,9 +230,10 @@ impl HookEngine {
                     command: hook.command.clone(),
                     stdout: String::new(),
                     stderr: format!("Hook timed out after {:?}", timeout),
-                    exit_code: -1,
+                    exit_code: -2,
                     duration_ms: start.elapsed().as_millis() as u64,
-                    block: false,
+                    block: hook.fail_closed,
+                    block_reason: hook.fail_closed.then(|| "hook timed out".to_string()),
                     modified_input: None,
                 };
             }
@@ -223,14 +244,14 @@ impl HookEngine {
         let exit_code = output.status.code().unwrap_or(-1);
 
         // Parse hook response — hooks can return JSON to block/modify
-        let (block, modified_input) = if !stdout.trim().is_empty() {
+        let (block, modified_input, block_reason) = if !stdout.trim().is_empty() {
             if let Ok(response) = serde_json::from_str::<HookResponse>(stdout.trim()) {
-                (response.block, response.modified_input)
+                (response.block, response.modified_input, response.reason)
             } else {
-                (false, None)
+                (false, None, None)
             }
         } else {
-            (false, None)
+            (false, None, None)
         };
 
         HookResult {
@@ -241,6 +262,7 @@ impl HookEngine {
             exit_code,
             duration_ms: start.elapsed().as_millis() as u64,
             block,
+            block_reason,
             modified_input,
         }
     }
@@ -266,6 +288,8 @@ struct HookResponse {
     #[serde(default)]
     block: bool,
     modified_input: Option<serde_json::Value>,
+    /// Optional human-readable reason for a block.
+    reason: Option<String>,
 }
 
 // ─── Default Hooks ────────────────────────────────────────────────────
@@ -280,6 +304,7 @@ pub fn default_hooks() -> Vec<HookDefinition> {
             timeout_seconds: Some(5),
             env: None,
             enabled: false, // Disabled by default
+            fail_closed: false,
         },
         HookDefinition {
             event: HookEvent::PreToolUse,
@@ -289,6 +314,7 @@ pub fn default_hooks() -> Vec<HookDefinition> {
             timeout_seconds: Some(5),
             env: None,
             enabled: false,
+            fail_closed: false,
         },
         HookDefinition {
             event: HookEvent::PostToolUse,
@@ -298,6 +324,7 @@ pub fn default_hooks() -> Vec<HookDefinition> {
             timeout_seconds: Some(5),
             env: None,
             enabled: false,
+            fail_closed: false,
         },
     ]
 }
@@ -326,9 +353,36 @@ mod tests {
 
     #[test]
     fn test_hook_response_parsing() {
-        let json = r#"{"block": true, "modified_input": {"command": "safe_command"}}"#;
+        let json = r#"{"block": true, "modified_input": {"command": "safe_command"}, "reason": "nope"}"#;
         let response: HookResponse = serde_json::from_str(json).unwrap();
         assert!(response.block);
         assert!(response.modified_input.is_some());
+        assert_eq!(response.reason.as_deref(), Some("nope"));
+    }
+
+    #[tokio::test]
+    async fn fail_closed_hook_blocks_on_timeout() {
+        // A security hook that times out must BLOCK when fail_closed (fail-closed),
+        // not silently allow the tool. Uses the platform shell's sleep.
+        let sleep = if cfg!(windows) { "Start-Sleep -Seconds 5" } else { "sleep 5" };
+        let mut engine = HookEngine::new();
+        engine.register(HookDefinition {
+            event: HookEvent::PreToolUse,
+            command: sleep.to_string(),
+            description: "slow security hook".to_string(),
+            working_dir: None,
+            timeout_seconds: Some(1),
+            env: None,
+            enabled: true,
+            fail_closed: true,
+        });
+        let ctx = HookContext {
+            session_id: "s".into(), workspace_dir: ".".into(), event: "pre_tool_use".into(),
+            tool_name: None, tool_input: None, tool_output: None, user_message: None,
+            assistant_message: None, timestamp: "t".into(),
+        };
+        let results = engine.fire(&HookEvent::PreToolUse, &ctx).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].block, "fail_closed hook must block on timeout");
     }
 }
