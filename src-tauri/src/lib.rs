@@ -99,6 +99,10 @@ pub fn run() {
             commands::memory::write_memory_md,
             commands::memory::get_today_note,
             commands::memory::search_memory_files,
+            commands::memory::list_user_facts,
+            commands::memory::add_user_fact,
+            commands::memory::update_user_fact,
+            commands::memory::delete_user_fact,
             // skills
             commands::skills::list_skills,
             commands::skills::read_skill,
