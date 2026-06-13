@@ -936,6 +936,10 @@ impl Agent {
         match &order.action {
             OrderAction::InjectContext { text } => ctx_out.push(text.clone()),
             OrderAction::SaveNote { template } => {
+                // Safe on any origin: the agent already logs every turn to the
+                // daily note, so a remote user's text is no new exposure. (The
+                // injected context for EveryNMessages uses a fixed `text` the
+                // remote user does not control.)
                 let _ = mem.append_daily(&render_template(template, message, message_count));
             }
             OrderAction::RunCommand { command } => {
@@ -944,9 +948,12 @@ impl Agent {
                     return;
                 }
                 let (shell, flag) = super::hooks::hook_shell();
-                match tokio::process::Command::new(shell).arg(flag).arg(command).output().await {
-                    Ok(o) => info!("standing order '{}' ran (exit {:?})", order.name, o.status.code()),
-                    Err(e) => tracing::warn!("standing order '{}' command failed: {}", order.name, e),
+                // Bounded like hooks: a hung command must not freeze the turn.
+                let run = tokio::process::Command::new(shell).arg(flag).arg(command).output();
+                match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+                    Ok(Ok(o)) => info!("standing order '{}' ran (exit {:?})", order.name, o.status.code()),
+                    Ok(Err(e)) => tracing::warn!("standing order '{}' command failed: {}", order.name, e),
+                    Err(_) => tracing::warn!("standing order '{}' RunCommand timed out (30s)", order.name),
                 }
             }
             OrderAction::Webhook { url, body } => {

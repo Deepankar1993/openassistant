@@ -135,10 +135,11 @@ impl StandingOrdersEngine {
         self.orders.push(order);
     }
 
-    /// Remove a standing order
+    /// Remove a standing order by full id or id-prefix (so the truncated id
+    /// shown in `list` is enough to remove — matches the WatcherStore behavior).
     pub fn remove(&mut self, id: &str) -> bool {
         let before = self.orders.len();
-        self.orders.retain(|o| o.id != id);
+        self.orders.retain(|o| !(o.id == id || o.id.starts_with(id)));
         self.orders.len() < before
     }
 
@@ -209,8 +210,12 @@ impl StandingOrdersEngine {
         // Simple parsing: "When I mention X, do Y"
         let input_lower = input.to_lowercase();
 
-        if input_lower.starts_with("when i mention") {
-            let rest = input.trim_start_matches("when i mention").trim();
+        const PREFIX: &str = "when i mention";
+        if input_lower.starts_with(PREFIX) {
+            // Slice the ORIGINAL (case-preserving) input by the prefix's byte
+            // length — `input.trim_start_matches(PREFIX)` would no-op on the
+            // title-cased "When I mention…" and silently fail the parse.
+            let rest = input[PREFIX.len()..].trim();
             let parts: Vec<&str> = rest.split(", then ").collect();
             if parts.len() == 2 {
                 let phrases: Vec<String> = parts[0].split(" or ")
@@ -347,6 +352,23 @@ mod tests {
         assert!(!e.matched("no keyword", 4).iter().any(|o| o.id == "n"));
         // SessionEnd surfaced only via check_session_end.
         assert_eq!(e.check_session_end().len(), 1);
+    }
+
+    #[test]
+    fn parse_from_text_handles_title_case_and_remove_by_prefix() {
+        // Title-cased input (as in the CLI help) must still parse.
+        let order = StandingOrdersEngine::parse_from_text("When I mention deploy, then remember it")
+            .expect("title-cased input parses");
+        match &order.trigger {
+            OrderTrigger::Keyword { phrases } => assert_eq!(phrases, &vec!["deploy".to_string()]),
+            t => panic!("expected Keyword, got {:?}", t),
+        }
+        // remove() accepts the id prefix shown by `list`.
+        let mut e = StandingOrdersEngine::default();
+        let id = order.id.clone();
+        e.add(order);
+        assert!(e.remove(&id[..8]), "remove by 8-char prefix works");
+        assert!(e.list().is_empty());
     }
 
     #[test]
