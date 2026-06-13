@@ -52,6 +52,11 @@
       app_version: "0.1.0",
     },
     history: [],
+    // Persisted conversations (most recent first is computed at read time).
+    // Each: { id, title, updated_at, messages:[Message] }
+    conversations: [],
+    convSeq: 0,
+    activeConvId: null,
     gatewayRunning: false,
     memoryMd: "# Long-term Memory\n\nNothing yet. Chat with your assistant to build up memory.",
     todayNote: "# Today\n\n*(no notes yet)*",
@@ -77,8 +82,67 @@
     },
   };
 
+  // Derive a short title for a conversation from its first user message.
+  function mockConvTitle(messages) {
+    const firstUser = messages.find((m) => m.role === "user");
+    const raw = (firstUser && firstUser.content) || "New conversation";
+    return raw.length > 48 ? raw.slice(0, 48) + "…" : raw;
+  }
+  // Persist the current history into mockState.conversations (if non-empty),
+  // returning the persisted conversation's id (or null). Updates in place when
+  // the active conversation already exists.
+  function mockPersistCurrent() {
+    if (!mockState.history.length) return null;
+    let conv = mockState.conversations.find((c) => c.id === mockState.activeConvId);
+    if (!conv) {
+      conv = { id: "conv-" + (++mockState.convSeq), title: "", updated_at: "", messages: [] };
+      mockState.conversations.push(conv);
+      // Adopt as the active conversation so subsequent turns update it in place
+      // rather than spawning duplicates.
+      mockState.activeConvId = conv.id;
+    }
+    conv.messages = mockState.history.slice();
+    conv.title = mockConvTitle(conv.messages);
+    conv.updated_at = new Date().toISOString();
+    return conv.id;
+  }
+
   async function defaultMock(cmd, args) {
     switch (cmd) {
+      // ── Conversations ──
+      case "list_conversations":
+        // newest first
+        return mockState.conversations
+          .slice()
+          .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
+          .map((c) => ({
+            id: c.id,
+            title: c.title || mockConvTitle(c.messages),
+            updated_at: c.updated_at,
+            message_count: c.messages.length,
+          }));
+      case "new_conversation":
+        mockPersistCurrent();
+        mockState.history = [];
+        mockState.activeConvId = null;
+        return null;
+      case "switch_conversation": {
+        // Persist the current (possibly unsaved) conversation first.
+        mockPersistCurrent();
+        const conv = mockState.conversations.find((c) => c.id === args.id);
+        if (!conv) return [];
+        mockState.history = conv.messages.slice();
+        mockState.activeConvId = conv.id;
+        return conv.messages.slice();
+      }
+      case "delete_conversation":
+        mockState.conversations = mockState.conversations.filter((c) => c.id !== args.id);
+        if (mockState.activeConvId === args.id) {
+          mockState.activeConvId = null;
+          mockState.history = [];
+        }
+        return null;
+
       // ── Onboarding ──
       case "get_app_state":
         return {
@@ -166,13 +230,19 @@
       case "get_history":
         return mockState.history.slice();
       case "clear_conversation":
+        // Now persists the current conversation (if any) then resets.
+        mockPersistCurrent();
         mockState.history = [];
+        mockState.activeConvId = null;
         return null;
       case "send_message": {
         if (!mockState.config.api_key_set) throw "No API key configured.";
         const user = { id: String(Math.random()), role: "user", content: args.message, timestamp: new Date().toISOString(), metadata: null };
         const asst = { id: String(Math.random()), role: "assistant", content: "(mock reply) " + args.message, timestamp: new Date().toISOString(), metadata: null };
         mockState.history.push(user, asst);
+        // Lazily persist so the conversation appears in list_conversations after
+        // its first completed turn (mirrors the real backend).
+        mockPersistCurrent();
         return asst;
       }
 
@@ -578,6 +648,8 @@
     setComposerStreaming(false);
     chatInput.focus();
     refreshStatus();
+    // A turn just completed: the conversation may have been newly persisted.
+    refreshConversations(true);
   }
 
   // Stop button: stop APPLYING events client-side and finalize the message.
@@ -666,6 +738,8 @@
       sendBtn.disabled = false;
       chatInput.focus();
       refreshStatus();
+      // A turn just completed: the conversation may have been newly persisted.
+      refreshConversations(true);
     }
   }
   sendBtn.addEventListener("click", () => {
@@ -681,12 +755,182 @@
   }
   chatInput.addEventListener("input", autoGrow);
 
+  // "New chat" (repurposed clear button): persists+resets the conversation,
+  // then starts a fresh empty chat. Keeps data-testid="clear-conversation".
   $("#clear-btn").addEventListener("click", async () => {
-    if (!confirm("Clear the current conversation? (Daily notes and learned memory are kept.)")) return;
-    await backend("clear_conversation", {});
+    if (!confirm("Start a new chat? The current conversation is saved to your history.")) return;
+    try { await backend("clear_conversation", {}); } catch (_) {}
+    resetToEmptyChat();
+    await refreshConversations();
+    refreshStatus();
+    if (!chatInput.disabled) chatInput.focus();
+  });
+
+  // ── Conversation history sidebar ──────────────────
+  // activeConvId tracks the currently-shown stored conversation. It is null for
+  // a brand-new, never-persisted chat, and is set to the newest list entry once
+  // that chat's first reply has landed (see refreshConversations).
+  let activeConvId = null;
+  const convList = $("#conv-list");
+
+  // Relative time: "just now", "5m ago", "2h ago", "yesterday", "3d ago",
+  // then falls back to a short date.
+  function relativeTime(iso) {
+    if (!iso) return "";
+    const then = new Date(iso).getTime();
+    if (isNaN(then)) return "";
+    const diff = Date.now() - then;
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return "just now";
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + "m ago";
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h ago";
+    const day = Math.floor(hr / 24);
+    if (day === 1) return "yesterday";
+    if (day < 7) return day + "d ago";
+    const wk = Math.floor(day / 7);
+    if (wk < 5) return wk + "w ago";
+    try {
+      return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    } catch (_) {
+      return day + "d ago";
+    }
+  }
+
+  function trashIcon() {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+  }
+
+  // Clear the message list back to the empty starter state.
+  function resetToEmptyChat() {
     messageList.innerHTML = "";
     messageList.appendChild(emptyState());
+    activeConvId = null;
+    highlightActiveConv();
+  }
+
+  // Render a list of Message objects (from switch_conversation / get_history)
+  // into #message-list using the shared render path.
+  function renderConversationMessages(messages) {
+    messageList.innerHTML = "";
+    if (Array.isArray(messages) && messages.length) {
+      messages.forEach(appendMessage);
+    } else {
+      messageList.appendChild(emptyState());
+    }
+  }
+
+  function highlightActiveConv() {
+    convList.querySelectorAll(".conv-item").forEach((li) => {
+      const isActive = li.dataset.id === activeConvId;
+      li.classList.toggle("active", isActive);
+      if (isActive) li.setAttribute("aria-current", "true");
+      else li.removeAttribute("aria-current");
+    });
+  }
+
+  function renderConversationList(convs) {
+    convList.innerHTML = "";
+    if (!convs.length) {
+      const empty = document.createElement("li");
+      empty.className = "conv-empty";
+      empty.textContent = "No conversations yet. Start chatting to build your history.";
+      convList.appendChild(empty);
+      return;
+    }
+    convs.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "conv-item";
+      li.dataset.id = c.id;
+      li.dataset.testid = "conversation-item";
+      li.tabIndex = 0;
+      if (c.id === activeConvId) { li.classList.add("active"); li.setAttribute("aria-current", "true"); }
+
+      const body = document.createElement("div");
+      body.className = "conv-item-body";
+      const title = document.createElement("span");
+      title.className = "conv-item-title";
+      title.textContent = c.title || "Untitled conversation";
+      const time = document.createElement("span");
+      time.className = "conv-item-time";
+      time.textContent = relativeTime(c.updated_at);
+      body.appendChild(title);
+      body.appendChild(time);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "conv-delete-btn";
+      del.dataset.testid = "conversation-delete";
+      del.setAttribute("aria-label", "Delete conversation");
+      del.innerHTML = trashIcon(); // static markup
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteConversation(c.id);
+      });
+
+      li.appendChild(body);
+      li.appendChild(del);
+      li.addEventListener("click", () => selectConversation(c.id));
+      li.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectConversation(c.id); }
+      });
+      convList.appendChild(li);
+    });
+  }
+
+  // Re-fetch the conversation list and re-highlight. When the active chat has
+  // just been persisted (first reply landed) but activeConvId is still null,
+  // adopt the newest entry as active.
+  async function refreshConversations(adoptNewest) {
+    let convs = [];
+    try {
+      const res = await backend("list_conversations", {});
+      if (Array.isArray(res)) convs = res;
+    } catch (_) {
+      convs = [];
+    }
+    if (adoptNewest && activeConvId === null && convs.length) {
+      activeConvId = convs[0].id;
+    }
+    renderConversationList(convs);
+    return convs;
+  }
+
+  async function selectConversation(id) {
+    if (id === activeConvId) return;
+    try {
+      const messages = await backend("switch_conversation", { id });
+      activeConvId = id;
+      renderConversationMessages(messages);
+      highlightActiveConv();
+      scrollToBottom(true);
+      refreshStatus();
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to open conversation", true);
+    }
+  }
+
+  async function deleteConversation(id) {
+    if (!confirm("Delete this conversation? This cannot be undone.")) return;
+    const wasActive = id === activeConvId;
+    try {
+      await backend("delete_conversation", { id });
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to delete conversation", true);
+      return;
+    }
+    if (wasActive) resetToEmptyChat();
+    await refreshConversations();
     refreshStatus();
+  }
+
+  $("#conv-new-btn").addEventListener("click", async () => {
+    try { await backend("new_conversation", {}); } catch (_) {}
+    resetToEmptyChat();
+    await refreshConversations();
+    refreshStatus();
+    if (!chatInput.disabled) chatInput.focus();
   });
 
   // ── Status / API-key gate ─────────────────────────
@@ -1972,13 +2216,19 @@
         if (p && p.name) { personaName = p.name; updatePersonaLabels(); }
       })
       .catch(() => {});
+    let hadHistory = false;
     try {
       const history = await backend("get_history", {});
       if (Array.isArray(history) && history.length) {
         messageList.innerHTML = "";
         history.forEach(appendMessage);
+        hadHistory = true;
       }
     } catch (_) {}
+
+    // Populate the conversation history sidebar. If the boot history is a
+    // persisted conversation, adopt the newest list entry as active.
+    try { await refreshConversations(hadHistory); } catch (_) {}
 
     // Route based on get_app_state instead of raw status check
     try {

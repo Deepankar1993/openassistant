@@ -14,6 +14,7 @@ pub mod multi_agent;
 pub mod web_search;
 pub mod goal_system;
 pub mod goal_store;
+pub mod conversation_store;
 pub mod permissions;
 pub mod checkpoint;
 pub mod worktree;

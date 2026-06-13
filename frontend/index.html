@@ -35,27 +35,42 @@
     <!-- Main content -->
     <main class="main">
       <!-- CHAT VIEW -->
-      <section class="view" id="view-chat" data-testid="view-chat">
-        <header class="view-head">
-          <div>
-            <h1>Chat</h1>
-            <p class="subtitle" id="chat-subtitle">Talk to your assistant</p>
+      <section class="view chat-view" id="view-chat" data-testid="view-chat">
+        <!-- Conversation history column -->
+        <aside class="conv-column" data-testid="conversation-column" aria-label="Conversations">
+          <div class="conv-head">
+            <h2 class="conv-title">Chats</h2>
+            <button class="conv-new-btn" id="conv-new-btn" type="button" data-testid="conversation-new" aria-label="New chat">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>New</span>
+            </button>
           </div>
-          <button class="btn ghost" id="clear-btn" data-testid="clear-conversation">Clear</button>
-        </header>
+          <ul class="conv-list" id="conv-list" data-testid="conversation-list" aria-label="Conversation history"></ul>
+        </aside>
 
-        <div id="apikey-banner" class="banner hidden" data-testid="apikey-banner">
-          <span>Add your API key in <strong>Settings</strong> to start chatting.</span>
-          <button class="btn small" data-view="settings" data-testid="banner-open-settings">Open Settings</button>
-        </div>
+        <!-- Chat main column (header, banner, messages, composer) -->
+        <div class="chat-main">
+          <header class="view-head">
+            <div>
+              <h1>Chat</h1>
+              <p class="subtitle" id="chat-subtitle">Talk to your assistant</p>
+            </div>
+            <button class="btn ghost" id="clear-btn" data-testid="clear-conversation">New chat</button>
+          </header>
 
-        <div class="chat-body">
-          <div class="messages" id="message-list" data-testid="message-list" aria-live="polite"></div>
-          <button class="jump-bottom hidden" id="jump-bottom" type="button" aria-label="Jump to latest message"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg><span>Latest</span></button>
-          <div class="composer">
-            <textarea id="chat-input" data-testid="chat-input" rows="1"
-              placeholder="Message openAssistant…" autocomplete="off"></textarea>
-            <button class="btn primary" id="send-btn" data-testid="chat-send" aria-label="Send">Send</button>
+          <div id="apikey-banner" class="banner hidden" data-testid="apikey-banner">
+            <span>Add your API key in <strong>Settings</strong> to start chatting.</span>
+            <button class="btn small" data-view="settings" data-testid="banner-open-settings">Open Settings</button>
+          </div>
+
+          <div class="chat-body">
+            <div class="messages" id="message-list" data-testid="message-list" aria-live="polite"></div>
+            <button class="jump-bottom hidden" id="jump-bottom" type="button" aria-label="Jump to latest message"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg><span>Latest</span></button>
+            <div class="composer">
+              <textarea id="chat-input" data-testid="chat-input" rows="1"
+                placeholder="Message openAssistant…" autocomplete="off"></textarea>
+              <button class="btn primary" id="send-btn" data-testid="chat-send" aria-label="Send">Send</button>
+            </div>
           </div>
         </div>
       </section>

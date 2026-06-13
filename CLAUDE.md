@@ -62,6 +62,17 @@ openAssistant is a personal AI assistant. Everything flows through one agent loo
 ### Context assembled into every prompt (`src/core/persona.rs`)
 `FullContext` = `Persona` (the agent's identity/principles/boundaries, OpenClaw "SOUL.md" style) + `UserModel` (built up over time, Hermes "Honcho" style) + session stats. `build_system_prompt()` renders all of it to markdown.
 
+### Conversation history (`src/core/conversation_store.rs`)
+Both chat surfaces persist switchable, named conversations to
+`<data_dir>/conversations.db` (SQLite, the `discord_store` pattern). The
+conversation id **is** the `Session.id`; titles are derived from the first user
+message. WebChat exposes `GET/POST /api/conversations`, `POST
+/api/conversations/select`, `DELETE /api/conversations/{id}`; the desktop adds
+`list/new/switch/delete_conversation` Tauri commands. Sessions are saved after
+every turn (empty ones are skipped). `FullContext` (persona + learned user model)
+stays process-shared, not per-conversation — only the `Session` is swapped on
+switch.
+
 ### Two parallel memory systems — don't confuse them
 - **File memory** (`src/core/memory.rs`, `MemoryWorkspace`): markdown files under the data dir — `MEMORY.md` (curated long-term), `memory/YYYY-MM-DD.md` (daily notes), `DREAMS.md`. This is what the agent loop reads/writes during conversation.
 - **SQLite + FTS5** (`src/memory/store.rs`, `MemoryStore`): structured, full-text-searchable store at `memory.db`. Used by `status`/`doctor` and intended for session search.

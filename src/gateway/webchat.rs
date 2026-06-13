@@ -4,18 +4,21 @@
 //! server when Slack is configured.
 
 use anyhow::Result;
+use axum::extract::Path;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse};
-use axum::{extract::State, routing::{get, post}, Json, Router};
+use axum::{extract::State, routing::{delete, get, post}, Json, Router};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::agent::AgentEvent;
+use crate::core::conversation_store::{ConversationMeta, ConversationStore};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
@@ -83,6 +86,9 @@ pub fn build_router(state: GatewayState) -> Router {
         .route("/", get(index_handler))
         .route("/api/messages", get(list_messages).post(send_message))
         .route("/api/chat/stream", post(chat_stream))
+        .route("/api/conversations", get(list_conversations).post(new_conversation))
+        .route("/api/conversations/select", post(select_conversation))
+        .route("/api/conversations/{id}", delete(delete_conversation))
         .route("/vendor/marked.min.js", get(|| async { js(VENDOR_MARKED) }))
         .route("/vendor/purify.min.js", get(|| async { js(VENDOR_PURIFY) }))
         .route("/vendor/highlight.min.js", get(|| async { js(VENDOR_HLJS) }))
@@ -180,6 +186,13 @@ async fn chat_stream(
         {
             convo.messages.push(ChatMessage::new("assistant", reply));
         }
+        // Persist the turn (user message + any assistant reply, including a
+        // partial/errored one — the user's message is already in the session).
+        // Snapshot then drop the lock so the synchronous SQLite write stays off
+        // the turn's critical section.
+        let snapshot = convo.session.clone();
+        drop(guard);
+        persist_convo(&state.config, &snapshot);
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|ev| {
@@ -217,5 +230,100 @@ async fn send_message(
 
     let response = ChatMessage::new("assistant", reply);
     convo.messages.push(response.clone());
+    // Snapshot + drop the lock before the synchronous SQLite write.
+    let snapshot = convo.session.clone();
+    drop(guard);
+    persist_convo(&state.config, &snapshot);
     Json(response)
+}
+
+// ── Conversation history ──
+
+/// Best-effort persistence of the active web conversation (empty sessions are
+/// skipped, so the sidebar has no blank rows). A failed save never breaks a turn.
+fn persist_convo(config: &Config, session: &Session) {
+    if session.messages().is_empty() {
+        return;
+    }
+    match ConversationStore::open_default(&config.general.data_dir) {
+        Ok(store) => {
+            if let Err(e) = store.save(session, None) {
+                warn!("could not persist web conversation: {}", e);
+            }
+        }
+        Err(e) => warn!("could not open conversation store: {}", e),
+    }
+}
+
+/// Rebuild the display message list from a loaded session.
+fn to_chat_messages(session: &Session) -> Vec<ChatMessage> {
+    session
+        .messages()
+        .iter()
+        .map(|m| ChatMessage {
+            id: m.id.clone(),
+            role: m.role.clone(),
+            content: m.content.clone(),
+            timestamp: m.timestamp.to_rfc3339(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct SelectBody {
+    id: String,
+}
+
+async fn list_conversations(State(state): State<GatewayState>) -> Json<Vec<ConversationMeta>> {
+    match ConversationStore::open_default(&state.config.general.data_dir) {
+        Ok(store) => Json(store.list_meta().unwrap_or_default()),
+        Err(_) => Json(Vec::new()),
+    }
+}
+
+/// Start a new conversation: persist the current one and reset the active convo.
+async fn new_conversation(State(state): State<GatewayState>) -> Json<serde_json::Value> {
+    let mut guard = state.web.lock().await;
+    persist_convo(&state.config, &guard.session);
+    *guard = Convo::new("webchat", "web", &state.config.general.data_dir);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Switch the active conversation; returns the loaded messages for re-render.
+async fn select_conversation(
+    State(state): State<GatewayState>,
+    Json(body): Json<SelectBody>,
+) -> Result<Json<Vec<ChatMessage>>, (StatusCode, String)> {
+    let mut guard = state.web.lock().await;
+    persist_convo(&state.config, &guard.session);
+    let store = ConversationStore::open_default(&state.config.general.data_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match store
+        .load(&body.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        Some(session) => {
+            let messages = to_chat_messages(&session);
+            guard.messages = messages.clone();
+            guard.session = session;
+            Ok(Json(messages))
+        }
+        None => Err((StatusCode::NOT_FOUND, format!("No conversation with id {}", body.id))),
+    }
+}
+
+async fn delete_conversation(
+    State(state): State<GatewayState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    // Lock first, then delete inside the critical section: otherwise a turn
+    // racing between the delete and the lock would re-persist (un-delete) the row.
+    let mut guard = state.web.lock().await;
+    if let Ok(store) = ConversationStore::open_default(&state.config.general.data_dir) {
+        let _ = store.delete(&id);
+    }
+    if guard.session.id == id {
+        *guard = Convo::new("webchat", "web", &state.config.general.data_dir);
+    }
+    Json(serde_json::json!({ "ok": true }))
 }
