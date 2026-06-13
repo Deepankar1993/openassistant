@@ -76,6 +76,10 @@ pub fn run() {
             commands::chat::get_history,
             commands::chat::get_status,
             commands::chat::clear_conversation,
+            commands::chat::new_conversation,
+            commands::chat::list_conversations,
+            commands::chat::switch_conversation,
+            commands::chat::delete_conversation,
             // settings
             commands::settings::get_config,
             commands::settings::save_config,

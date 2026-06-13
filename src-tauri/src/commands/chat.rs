@@ -2,12 +2,30 @@
 
 use crate::state::AppCore;
 use open_assistant::config;
+use open_assistant::core::conversation_store::{ConversationMeta, ConversationStore};
 use open_assistant::core::memory::MemoryWorkspace;
 use open_assistant::core::session::Session;
 use open_assistant::core::Message;
 use open_assistant::memory::store::MemoryStore;
 use serde::Serialize;
 use tauri::State;
+
+/// Persist the turn's session to the conversation store (best-effort: a failed
+/// save logs and never breaks the turn). Empty sessions are not written, so the
+/// history sidebar has no blank entries.
+fn persist_session(turn: &crate::state::Turn) {
+    if turn.session.messages().is_empty() {
+        return;
+    }
+    match ConversationStore::open_default(&turn.agent.workspace_dir) {
+        Ok(store) => {
+            if let Err(e) = store.save(&turn.session, None) {
+                log::warn!("could not persist conversation: {}", e);
+            }
+        }
+        Err(e) => log::warn!("could not open conversation store: {}", e),
+    }
+}
 
 /// Status summary shown in the chat sidebar and the Status panel. Token/cost
 /// fields are intentionally omitted (rather than reported as fabricated zeros)
@@ -38,11 +56,14 @@ pub async fn send_message(state: State<'_, AppCore>, message: String) -> Result<
         return Err("Cannot send an empty message.".into());
     }
     let mut turn = state.turn.lock().await;
-    let crate::state::Turn { agent, ctx, session } = &mut *turn;
-    let reply = agent
-        .process(&message, ctx, session)
-        .await
-        .map_err(|e| e.to_string())?;
+    let reply = {
+        let crate::state::Turn { agent, ctx, session } = &mut *turn;
+        agent
+            .process(&message, ctx, session)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    persist_session(&turn);
     Ok(Message::assistant(reply))
 }
 
@@ -68,9 +89,14 @@ pub async fn send_message_stream(
     });
 
     let mut turn = state.turn.lock().await;
-    let crate::state::Turn { agent, ctx, session } = &mut *turn;
-    let result = agent.process_events(&message, ctx, session, tx).await;
+    let result = {
+        let crate::state::Turn { agent, ctx, session } = &mut *turn;
+        agent.process_events(&message, ctx, session, tx).await
+    };
     let _ = forward.await;
+    if result.is_ok() {
+        persist_session(&turn);
+    }
     result.map(Message::assistant).map_err(|e| e.to_string())
 }
 
@@ -110,12 +136,67 @@ pub async fn get_status(state: State<'_, AppCore>) -> Result<StatusResponse, Str
     })
 }
 
-/// Reset the in-memory transcript. NOTE: clears only the visible conversation;
-/// it does NOT remove the daily-note markdown or reset the learned `UserModel`
-/// that `Agent::process` already persisted to the data dir.
+/// Start a new conversation: persist the current one (if it has messages) and
+/// reset the active session. NOTE: learned `UserModel` and daily-note markdown
+/// that `Agent::process` already wrote to the data dir are intentionally kept.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_conversation(state: State<'_, AppCore>) -> Result<(), String> {
     let mut turn = state.turn.lock().await;
+    persist_session(&turn);
     turn.session = Session::new("desktop", "local");
+    Ok(())
+}
+
+/// New conversation — alias of `clear_conversation` with intent-revealing name
+/// for the sidebar's "+ New chat" affordance.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn new_conversation(state: State<'_, AppCore>) -> Result<(), String> {
+    let mut turn = state.turn.lock().await;
+    persist_session(&turn);
+    turn.session = Session::new("desktop", "local");
+    Ok(())
+}
+
+/// Conversation rows for the history sidebar (newest-updated first). Includes
+/// the active session if it has unsaved messages, so it always appears.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_conversations(state: State<'_, AppCore>) -> Result<Vec<ConversationMeta>, String> {
+    let turn = state.turn.lock().await;
+    let store = ConversationStore::open_default(&turn.agent.workspace_dir)
+        .map_err(|e| e.to_string())?;
+    store.list_meta().map_err(|e| e.to_string())
+}
+
+/// Switch the active conversation: persist the current one, load `id` into the
+/// turn, and return its messages for the frontend to re-hydrate.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn switch_conversation(
+    state: State<'_, AppCore>,
+    id: String,
+) -> Result<Vec<Message>, String> {
+    let mut turn = state.turn.lock().await;
+    let store = ConversationStore::open_default(&turn.agent.workspace_dir)
+        .map_err(|e| e.to_string())?;
+    persist_session(&turn);
+    match store.load(&id).map_err(|e| e.to_string())? {
+        Some(session) => {
+            let messages = session.messages().to_vec();
+            turn.session = session;
+            Ok(messages)
+        }
+        None => Err(format!("No conversation with id {id}")),
+    }
+}
+
+/// Delete a conversation. If it is the active one, start a fresh session.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn delete_conversation(state: State<'_, AppCore>, id: String) -> Result<(), String> {
+    let mut turn = state.turn.lock().await;
+    let store = ConversationStore::open_default(&turn.agent.workspace_dir)
+        .map_err(|e| e.to_string())?;
+    store.delete(&id).map_err(|e| e.to_string())?;
+    if turn.session.id == id {
+        turn.session = Session::new("desktop", "local");
+    }
     Ok(())
 }
