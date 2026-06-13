@@ -79,6 +79,13 @@ only for `operator` (else skipped); `RunTool`/`RunSkill`/`SendMessage` → logge
 (v1). `SessionEnd` orders run at the Stop point. Manage via `openassistant
 standing-orders` (alias `orders`) `--action list|add|remove`.
 
+**Cron jobs run inside the proactive loop.** `gateway/proactive.rs::run_cron_step` loads
+`CronScheduler` (`src/cron/scheduler.rs`, persisted at `<data_dir>/cron.json`), runs jobs
+whose `"every <N>{m,h,d}"` schedule is due (a stored prompt through a fresh non-operator
+agent), and delivers the result via `post_everywhere`. Manage with `openassistant cron
+--action list|add|remove|run` (`run` executes due jobs now and prints them). It reuses the
+one proactive loop — no parallel scheduler.
+
 **Permissions are enforced in the loop (origin-aware).** `Agent.permission_mode` defaults to `BypassPermissions` for local front-ends (TUI/desktop keep full autonomy once tools are enabled); gateway channels construct agents with `permissions.gateway_mode` from config (default `acceptEdits`). Config `[permissions]` `allow`/`ask`/`deny` rules (Claude-Code-style, incl. `Bash(git *)` wildcards) apply at **every** mode — deny beats bypass; `Ask` resolves to a refusal text returned to the model (the agent is headless). The `task` tool spawns a real in-process sub-agent with a scoped tool list and depth limit 1.
 
 ### Context assembled into every prompt (`src/core/persona.rs`)

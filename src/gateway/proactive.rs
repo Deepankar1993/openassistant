@@ -2,8 +2,9 @@
 //! The proactive loop — the assistant messages you first.
 //!
 //! Spawned by `run_all`: a 60s tick that (a) delivers the daily brief at the
-//! configured local time and (b) checks due URL watchers, posting change
-//! notifications. Config is re-read every tick (live enable/disable, the
+//! configured local time, (b) checks due URL watchers, and (c) runs due cron
+//! jobs (a stored prompt through the agent, result delivered to the proactive
+//! channels). Config is re-read every tick (live enable/disable, the
 //! `review_loop` pattern); every step logs-and-continues so the gateway
 //! never dies from a proactive failure.
 
@@ -12,8 +13,12 @@ use serenity::model::id::ChannelId;
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::core::agent::Agent;
 use crate::core::brief;
+use crate::core::persona::{FullContext, Persona};
+use crate::core::session::Session;
 use crate::core::watchers::WatcherStore;
+use crate::cron::scheduler::CronScheduler;
 
 pub async fn proactive_loop(initial: Config) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -29,6 +34,44 @@ pub async fn proactive_loop(initial: Config) {
 
         run_brief_step(&cfg).await;
         run_watcher_step(&cfg).await;
+        run_cron_step(&cfg).await;
+    }
+}
+
+/// Run any cron jobs due now: execute each job's prompt through a fresh agent
+/// and deliver the result to the proactive channels. Non-operator (no hooks),
+/// tools per config, capped at the gateway permission mode — these are
+/// unattended runs.
+async fn run_cron_step(cfg: &Config) {
+    let mut scheduler = CronScheduler::load(&cfg.general.data_dir);
+    let due = scheduler.take_due(chrono::Utc::now());
+    if due.is_empty() {
+        return;
+    }
+    for job in &due {
+        let result = run_cron_job(cfg, &job.task).await;
+        post_everywhere(cfg, &format!("⏰ {}\n\n{}", job.name, result)).await;
+    }
+    // Persist AFTER running, so a save failure causes a retry next tick rather
+    // than silently dropping the run (mirrors run_brief_step's mark-on-success).
+    if let Err(e) = scheduler.save(&cfg.general.data_dir) {
+        warn!("could not persist cron schedule (jobs will re-run next tick): {}", e);
+    }
+}
+
+async fn run_cron_job(cfg: &Config, task: &str) -> String {
+    let agent = Agent::new(cfg.model.model.clone())
+        .with_workspace(cfg.general.data_dir.clone())
+        .with_tools_enabled(cfg.tools.enabled)
+        .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
+            &cfg.permissions.gateway_mode,
+        ));
+    let mut ctx = FullContext::new();
+    ctx.persona = Persona::load_or_default(&cfg.general.data_dir);
+    let mut session = Session::new("cron", "scheduler");
+    match agent.process(task, &mut ctx, &mut session).await {
+        Ok(r) => r,
+        Err(e) => format!("⚠️ cron job failed: {}", e),
     }
 }
 
