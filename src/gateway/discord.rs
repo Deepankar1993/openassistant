@@ -343,7 +343,7 @@ const HELP_TEXT: &str = "🦉 openAssistant — Discord:\n\
 • DM me for a 1:1 chat. Threads & history persist across restarts.";
 
 /// Start the Discord gateway. Blocks until the client disconnects.
-pub async fn start(config: Config) -> Result<()> {
+pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>) -> Result<()> {
     let token = config.gateway.discord_token.clone();
     if token.trim().is_empty() {
         anyhow::bail!("No Discord token configured (gateway.discord_token).");
@@ -359,12 +359,15 @@ pub async fn start(config: Config) -> Result<()> {
     let owned = store.owned_threads().unwrap_or_default();
     info!("Loaded {} persisted Discord thread(s).", owned.len());
 
-    let agent = Agent::new(config.model.model.clone())
+    let mut agent = Agent::new(config.model.model.clone())
         .with_workspace(config.general.data_dir.clone())
         .with_tools_enabled(config.tools.enabled)
         .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
             &config.permissions.gateway_mode,
         ));
+    if let Some(m) = &mcp {
+        agent = agent.with_mcp(m.clone());
+    }
 
     let home = config.gateway.discord_home_channel.trim().parse::<u64>().ok();
 

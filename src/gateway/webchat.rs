@@ -110,14 +110,17 @@ pub fn build_router(state: GatewayState) -> Router {
 }
 
 /// Construct the shared gateway state (one agent built from config).
-pub fn build_state(config: Config) -> GatewayState {
+pub fn build_state(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>) -> GatewayState {
     let data_dir = config.general.data_dir.clone();
-    let agent = Agent::new(config.model.model.clone())
+    let mut agent = Agent::new(config.model.model.clone())
         .with_workspace(data_dir.clone())
         .with_tools_enabled(config.tools.enabled)
         .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
             &config.permissions.gateway_mode,
         ));
+    if let Some(m) = &mcp {
+        agent = agent.with_mcp(m.clone());
+    }
     GatewayState {
         agent: Arc::new(agent),
         web: Arc::new(Mutex::new(Convo::new("webchat", "web", &data_dir))),
@@ -127,17 +130,17 @@ pub fn build_state(config: Config) -> GatewayState {
     }
 }
 
-pub async fn start(config: Config) -> Result<()> {
-    start_on(config, None).await
+pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>) -> Result<()> {
+    start_on(config, None, mcp).await
 }
 
 /// Start the WebChat server, optionally overriding the configured port (used
 /// by the `web` CLI command's `--port` flag).
-pub async fn start_on(config: Config, port_override: Option<u16>) -> Result<()> {
+pub async fn start_on(config: Config, port_override: Option<u16>, mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>) -> Result<()> {
     // Host/port resolve through the shared helpers (empty host ⇒ 0.0.0.0, port 0 ⇒ 3000).
     let host = crate::config::webchat_host(&config);
     let port = port_override.unwrap_or_else(|| crate::config::webchat_port(&config));
-    let state = build_state(config);
+    let state = build_state(config, mcp);
     let app = build_router(state);
 
     let addr = format!("{}:{}", host, port);

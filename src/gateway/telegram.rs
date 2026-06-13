@@ -21,18 +21,21 @@ struct Convo {
 const MAX_SESSION_MESSAGES: usize = 40;
 
 /// Run the Telegram long-poll loop until the process exits.
-pub async fn start(config: Config) -> Result<()> {
+pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>) -> Result<()> {
     let token = config.gateway.telegram_token.clone();
     if token.trim().is_empty() {
         anyhow::bail!("No Telegram token configured (gateway.telegram_token).");
     }
     let data_dir = config.general.data_dir.clone();
-    let agent = Agent::new(config.model.model.clone())
+    let mut agent = Agent::new(config.model.model.clone())
         .with_workspace(data_dir.clone())
         .with_tools_enabled(config.tools.enabled)
         .with_permission_mode(crate::core::permissions::PermissionMode::from_str(
             &config.permissions.gateway_mode,
         ));
+    if let Some(m) = &mcp {
+        agent = agent.with_mcp(m.clone());
+    }
 
     let client = reqwest::Client::new();
     let api = format!("https://api.telegram.org/bot{}", token);

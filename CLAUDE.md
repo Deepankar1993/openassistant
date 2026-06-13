@@ -101,6 +101,19 @@ edit / one-click-forget facts (`list/add/update/delete_user_fact` commands). Use
 older `open_default` which hardcodes `~/.openassistant`. (The in-memory `UserModel` in
 `FullContext` is separate, auto-learned, and still NOT persisted — a known follow-up.)
 
+### MCP tool servers (`src/core/mcp.rs`)
+External MCP servers declared in `<data_dir>/.mcp.json` (`mcpServers` key) are real:
+stdio transport keeps a persistent subprocess and does JSON-RPC `initialize` →
+`tools/list` → `tools/call` with id-matched, timeout-bounded framing (`read_rpc_response`);
+HTTP is a best-effort JSON-RPC POST; WebSocket is unimplemented. The gateway builds ONE
+shared `Arc<McpRegistry>` in `run_all` and attaches it to every channel agent via
+`Agent::with_mcp`; their tools are advertised as `mcp__<server>__<tool>` and routed in
+`execute_tool` → `registry.call_prefixed`. MCP tools are permission-gated by that full
+name — NOT auto-allowed, so on a gateway (capped at `acceptEdits`) they need a
+`permissions.allow: ["mcp__*"]` rule (locally/BypassPermissions they run). Inspect/test
+with `openassistant mcp --action list|call`. Desktop/TUI MCP wiring is a follow-up (the
+TUI has no real agent loop; the desktop builds its agent synchronously).
+
 ### Conversation history (`src/core/conversation_store.rs`)
 Both chat surfaces persist switchable, named conversations to
 `<data_dir>/conversations.db` (SQLite, the `discord_store` pattern). The
