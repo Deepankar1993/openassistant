@@ -63,8 +63,12 @@ at SessionStart / UserPromptSubmit / PreToolUse / PostToolUse(+Failure) / Stop. 
 `PreToolUse` hook can block a tool (the result becomes a `⛔` message the model adapts
 to) or rewrite its `modified_input`. Hooks run arbitrary shell, so they fire ONLY for
 `Agent.operator == true` (set via `.operator()` by the CLI/TUI/desktop) — never for
-gateway-channel or sub-agent turns. `load_hooks()` returns `None` otherwise and nothing
-shells out.
+gateway-channel or sub-agent turns. `load_hooks_for()` returns `None` otherwise and nothing
+shells out. Hook commands run in the platform shell (PowerShell on Windows, bash
+elsewhere — `hooks::hook_shell()`). A `PreToolUse` hook with `"fail_closed": true` blocks
+the tool if it times out or fails to spawn (fail-closed for security hooks; default is
+fail-open). The engine load is done via `spawn_blocking` (sync fs read off the async
+thread).
 
 **Permissions are enforced in the loop (origin-aware).** `Agent.permission_mode` defaults to `BypassPermissions` for local front-ends (TUI/desktop keep full autonomy once tools are enabled); gateway channels construct agents with `permissions.gateway_mode` from config (default `acceptEdits`). Config `[permissions]` `allow`/`ask`/`deny` rules (Claude-Code-style, incl. `Bash(git *)` wildcards) apply at **every** mode — deny beats bypass; `Ask` resolves to a refusal text returned to the model (the agent is headless). The `task` tool spawns a real in-process sub-agent with a scoped tool list and depth limit 1.
 

@@ -225,7 +225,14 @@ impl Agent {
 
         // Lifecycle hooks for this turn (operator only; None ⇒ no-op, no shell
         // runs — a remote-channel turn must never trigger the host's hooks).
-        let hooks = self.load_hooks();
+        // Loaded off the async thread (sync fs read), like the facts injection.
+        let hooks = {
+            let operator = self.operator;
+            let ws = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || Self::load_hooks_for(operator, &ws))
+                .await
+                .unwrap_or(None)
+        };
         let first_turn = session.messages().is_empty();
 
         // Add daily note about this interaction
@@ -843,11 +850,12 @@ impl Agent {
     /// Load lifecycle hooks for this turn — only for the trusted local
     /// operator. Returns `None` for remote/gateway agents (so `fire_hook` is a
     /// no-op and no shell runs). A missing hooks.json yields an empty engine.
-    fn load_hooks(&self) -> Option<super::hooks::HookEngine> {
-        if !self.operator {
+    /// Associated fn (owned args) so it can run inside `spawn_blocking`.
+    fn load_hooks_for(operator: bool, workspace_dir: &str) -> Option<super::hooks::HookEngine> {
+        if !operator {
             return None;
         }
-        super::hooks::HookEngine::load_from_workspace(&self.workspace_dir).ok()
+        super::hooks::HookEngine::load_from_workspace(workspace_dir).ok()
     }
 
     /// Build a `HookContext` for `session`/`event`; callers set the
@@ -1326,11 +1334,16 @@ fn decide_pre_tool(results: &[super::hooks::HookResult]) -> PreToolDecision {
     for r in results {
         if r.block {
             decision.blocked = true;
-            decision.reason = if r.stderr.trim().is_empty() {
-                "blocked by a PreToolUse hook".to_string()
-            } else {
-                r.stderr.trim().to_string()
-            };
+            // Prefer the hook's structured reason, then stderr, then a generic.
+            decision.reason = r
+                .block_reason
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    let e = r.stderr.trim();
+                    (!e.is_empty()).then(|| e.to_string())
+                })
+                .unwrap_or_else(|| "blocked by a PreToolUse hook".to_string());
             decision.modified_input = None;
             return decision;
         }
@@ -1685,6 +1698,7 @@ mod tests {
             exit_code: 0,
             duration_ms: 0,
             block,
+            block_reason: None,
             modified_input: modified,
         }
     }
@@ -1721,13 +1735,14 @@ mod tests {
     #[test]
     fn load_hooks_is_gated_on_operator() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().to_str().unwrap().to_string();
+        let ws = dir.path().to_str().unwrap();
         // Non-operator (default, e.g. a gateway agent): no hook engine at all.
-        let remote = Agent::new("m").with_workspace(ws.clone());
-        assert!(remote.load_hooks().is_none(), "remote agents must not load hooks");
+        assert!(Agent::load_hooks_for(false, ws).is_none(), "remote agents must not load hooks");
         // Operator: an engine is loaded (empty here — no hooks.json).
-        let local = Agent::new("m").with_workspace(ws).operator();
-        assert!(local.load_hooks().is_some());
+        assert!(Agent::load_hooks_for(true, ws).is_some());
+        // The builder sets the flag the loader gates on.
+        assert!(Agent::new("m").operator().operator);
+        assert!(!Agent::new("m").operator);
     }
 
     #[tokio::test]
