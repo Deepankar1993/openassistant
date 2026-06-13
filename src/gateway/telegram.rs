@@ -92,16 +92,15 @@ pub async fn start(config: Config) -> Result<()> {
 
             // On the first message for this chat after (re)start, restore the
             // persisted session if there is one, else start fresh.
-            if !sessions.contains_key(&chat_id) {
+            let convo = sessions.entry(chat_id).or_insert_with(|| {
                 let session = store
                     .as_ref()
                     .and_then(|s| s.load("telegram", &chat_id.to_string()).ok().flatten())
                     .unwrap_or_else(|| Session::new("telegram", chat_id.to_string()));
                 let mut ctx = FullContext::new();
                 ctx.persona = Persona::load_or_default(&data_dir);
-                sessions.insert(chat_id, Convo { ctx, session });
-            }
-            let convo = sessions.get_mut(&chat_id).expect("just inserted");
+                Convo { ctx, session }
+            });
 
             let reply = match agent.process(&text, &mut convo.ctx, &mut convo.session).await {
                 Ok(r) => r,

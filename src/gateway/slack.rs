@@ -83,9 +83,22 @@ async fn handle_message(state: GatewayState, channel: String, user: String, text
     // connection (best-effort — a failed open degrades to in-memory only).
     let store = ChannelSessionStore::open_default(&data_dir).ok();
 
+    // Serialize this channel's whole turn. Without it, two concurrent events for
+    // the same channel both load → process → save and the last writer silently
+    // clobbers the other's turn (in memory AND on disk). Cross-channel events
+    // still run concurrently.
+    let chan_lock = {
+        let mut locks = state.slack_locks.lock().await;
+        locks
+            .entry(channel.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _turn = chan_lock.lock().await;
+
     // Take this channel's conversation OUT of the map, drop the guard before the
-    // agent await, then re-insert — never hold the lock across `process()`. On a
-    // cache miss, restore the persisted session before starting fresh.
+    // agent await, then re-insert — never hold the map lock across `process()`.
+    // On a cache miss, restore the persisted session before starting fresh.
     let mut convo = {
         let mut map = state.slack_sessions.lock().await;
         match map.remove(&channel) {

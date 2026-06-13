@@ -34,6 +34,10 @@ pub struct GatewayState {
     pub config: Arc<Config>,
     pub web: Arc<Mutex<Convo>>,
     pub slack_sessions: Arc<Mutex<HashMap<String, Convo>>>,
+    /// Per-channel locks serializing a Slack channel's whole turn
+    /// (load → process → save → cache), so concurrent same-channel events
+    /// can't lose a turn in memory or on disk. Bounded by the channel count.
+    pub slack_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 /// One conversation: the learned context + message history.
@@ -118,6 +122,7 @@ pub fn build_state(config: Config) -> GatewayState {
         agent: Arc::new(agent),
         web: Arc::new(Mutex::new(Convo::new("webchat", "web", &data_dir))),
         slack_sessions: Arc::new(Mutex::new(HashMap::new())),
+        slack_locks: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(config),
     }
 }

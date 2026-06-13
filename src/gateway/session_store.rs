@@ -3,8 +3,13 @@
 //! so Telegram chats and Slack channels survive restarts the way Discord threads
 //! already do (`discord_store.rs`). One table shared across channels; the
 //! composite primary key keeps a Telegram chat_id and a Slack channel with the
-//! same string from colliding. Opened per-operation (cheap) like the other
-//! gateway stores, which avoids holding a `Connection` across an `.await`.
+//! same string from colliding.
+//!
+//! Lifetime: Telegram holds one connection for the whole single-tasked poll
+//! loop; Slack opens one per event handler and drops it after the save (so a
+//! connection is never held across an `.await`). Because Slack handlers run
+//! concurrently, every connection sets a `busy_timeout` so a second writer
+//! waits for the WAL lock instead of failing with `SQLITE_BUSY`.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -23,6 +28,9 @@ impl ChannelSessionStore {
 
     pub fn open(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+        // Concurrent Slack handlers each open their own connection; wait for the
+        // WAL write lock rather than returning SQLITE_BUSY immediately.
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS channel_sessions (
