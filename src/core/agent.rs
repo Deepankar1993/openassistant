@@ -34,6 +34,11 @@ pub struct Agent {
     /// channel (Discord/Telegram/Slack) must NEVER fire the host's shell hooks.
     /// Default false (untrusted); local front-ends opt in via `.operator()`.
     pub operator: bool,
+    /// Optional registry of initialized MCP servers. Shared (`Arc`) because it
+    /// owns live subprocesses; built once at startup and attached via
+    /// `.with_mcp()`. When set, its tools are advertised in the prompt as
+    /// `mcp__<server>__<tool>` and routed in `execute_tool`.
+    pub mcp: Option<std::sync::Arc<super::mcp::McpRegistry>>,
 }
 
 /// Max LLM⇄tool rounds per user turn.
@@ -101,7 +106,15 @@ impl Agent {
             permission_mode: super::permissions::PermissionMode::BypassPermissions,
             depth: 0,
             operator: false,
+            mcp: None,
         }
+    }
+
+    /// Attach an initialized MCP registry (its tools become callable as
+    /// `mcp__<server>__<tool>`).
+    pub fn with_mcp(mut self, registry: std::sync::Arc<super::mcp::McpRegistry>) -> Self {
+        self.mcp = Some(registry);
+        self
     }
 
     /// Mark this agent as the trusted local operator — enables lifecycle hooks
@@ -473,6 +486,12 @@ impl Agent {
             for tool in &self.tools {
                 prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
             }
+            // MCP server tools (callable as mcp__<server>__<tool>).
+            if let Some(mcp) = &self.mcp {
+                for tool in mcp.list_all_tools() {
+                    prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
+                }
+            }
             prompt.push('\n');
             push_str(&mut prompt, "After you emit a tool call, STOP — the tool result will be sent back to you as a [TOOL RESULT: name] message, and you can then continue or emit the next tool call. One tool call per message.");
             push_str(&mut prompt, "When you learn a durable fact about the user (a preference, an ongoing project, important personal context), save it with [TOOL:remember:{\"action\":\"add\",\"value\":\"...\"}] so you still know it next time.");
@@ -705,6 +724,13 @@ impl Agent {
             "self_manage" => {
                 self.handle_self_manage(&tool_call.arguments, mem, ctx).await
             }
+            name if name.starts_with("mcp__") => match &self.mcp {
+                Some(reg) => match reg.call_prefixed(name, tool_call.arguments.clone()).await {
+                    Ok(out) => Ok(out),
+                    Err(e) => Ok(format!("MCP error: {}", e)),
+                },
+                None => Ok("No MCP servers are configured (add them to <data_dir>/.mcp.json).".to_string()),
+            },
             _ => {
                 tracing::warn!("Unknown tool: {}", tool_call.name);
                 Ok(format!("Unknown tool '{}'. Available tools are listed in the system prompt.", tool_call.name))
@@ -1260,8 +1286,10 @@ impl Agent {
     }
 
     fn parse_tool_call(&self, text: &str) -> Option<ToolCall> {
-        let re = regex::Regex::new(r"\[TOOL:(\w+):(\{.*?\})\]").ok()?;
-        re.captures(text).map(|caps| ToolCall {
+        // Compiled once — this runs every tool-loop iteration.
+        static RE: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"\[TOOL:(\w+):(\{.*?\})\]").unwrap());
+        RE.captures(text).map(|caps| ToolCall {
             name: caps[1].to_string(),
             arguments: serde_json::from_str(&caps[2]).unwrap_or(serde_json::json!({})),
         })

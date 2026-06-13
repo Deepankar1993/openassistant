@@ -9,7 +9,7 @@ pub mod webchat;
 
 use anyhow::Result;
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::Config;
 
@@ -129,12 +129,16 @@ pub fn format_readiness(reqs: &[GatewayRequirement]) -> String {
 /// the foreground (blocks until it stops). Shared by the CLI (`start_gateway`)
 /// and the desktop (`start_gateway_handle`).
 async fn run_all(config: Config) -> Result<()> {
+    // One MCP registry (owns the server subprocesses) shared across channels.
+    let mcp = build_mcp(&config).await;
+
     // Discord/Telegram run on their own tasks; failures are logged, not lost.
     if !config.gateway.discord_token.is_empty() {
         info!("Discord token configured, starting Discord handler...");
         let cfg = config.clone();
+        let mcp = mcp.clone();
         tokio::spawn(async move {
-            if let Err(e) = discord::start(cfg).await {
+            if let Err(e) = discord::start(cfg, mcp).await {
                 tracing::error!("Discord gateway error: {}", e);
             }
         });
@@ -142,8 +146,9 @@ async fn run_all(config: Config) -> Result<()> {
     if !config.gateway.telegram_token.is_empty() {
         info!("Telegram token configured, starting Telegram handler...");
         let cfg = config.clone();
+        let mcp = mcp.clone();
         tokio::spawn(async move {
-            if let Err(e) = telegram::start(cfg).await {
+            if let Err(e) = telegram::start(cfg, mcp).await {
                 tracing::error!("Telegram gateway error: {}", e);
             }
         });
@@ -160,7 +165,26 @@ async fn run_all(config: Config) -> Result<()> {
     }
 
     info!("Starting WebChat messaging server (real agent loop)...");
-    webchat::start(config).await
+    webchat::start(config, mcp).await
+}
+
+/// Build the shared MCP registry from `<data_dir>/.mcp.json` and initialize its
+/// servers. Returns None when nothing is configured / on error (logged).
+async fn build_mcp(config: &Config) -> Option<std::sync::Arc<crate::core::mcp::McpRegistry>> {
+    match crate::core::mcp::McpRegistry::open_default(&config.general.data_dir) {
+        Ok(mut reg) if !reg.is_empty() => {
+            match reg.initialize_all().await {
+                Ok(n) => info!("MCP: initialized {} server(s)", n),
+                Err(e) => warn!("MCP initialize error: {}", e),
+            }
+            Some(std::sync::Arc::new(reg))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            warn!("MCP config error: {}", e);
+            None
+        }
+    }
 }
 
 /// Run the gateway in the foreground (CLI `openassistant gateway`).

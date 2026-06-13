@@ -39,6 +39,17 @@ enum Commands {
     /// Generate the daily brief now and print it (scheduled delivery is the
     /// gateway's proactive loop — config [brief]).
     Brief,
+    /// Inspect/test MCP servers from <data_dir>/.mcp.json.
+    Mcp {
+        /// list | call (default: list)
+        #[arg(long)] action: Option<String>,
+        /// For call: server name
+        #[arg(long)] server: Option<String>,
+        /// For call: tool name
+        #[arg(long)] tool: Option<String>,
+        /// For call: JSON arguments (default {})
+        #[arg(long)] args: Option<String>,
+    },
     /// Manage scheduled jobs (cron.json). The gateway's proactive loop runs due
     /// jobs and delivers results; `--action run` runs due jobs now.
     Cron {
@@ -332,6 +343,52 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Mcp { action, server, tool, args } => {
+            // Local operator CLI: full autonomy (like `claude`). `mcp call` runs
+            // a tool directly, outside the agent's permission gate — the remote
+            // gateway path keeps the gate (MCP tools need an allow rule there).
+            use open_assistant::core::mcp::McpRegistry;
+            let config = config::load().await?;
+            let mut registry = McpRegistry::open_default(&config.general.data_dir)?;
+            if registry.is_empty() {
+                println!("No MCP servers configured. Add them to {}/.mcp.json (key \"mcpServers\").", config.general.data_dir);
+            } else {
+                let n = registry.initialize_all().await?;
+                println!("Initialized {} MCP server(s).\n", n);
+                match action.as_deref().unwrap_or("list") {
+                    "call" => match (server, tool) {
+                        (Some(s), Some(t)) => {
+                            let parsed = match args.as_deref() {
+                                Some(a) => match serde_json::from_str::<serde_json::Value>(a) {
+                                    Ok(v) => Some(v),
+                                    Err(e) => {
+                                        println!("Invalid --args JSON: {}", e);
+                                        None
+                                    }
+                                },
+                                None => Some(serde_json::json!({})),
+                            };
+                            if let Some(parsed) = parsed {
+                                let prefixed = format!("mcp__{}__{}", s, t);
+                                match registry.call_prefixed(&prefixed, parsed).await {
+                                    Ok(out) => println!("{}", out),
+                                    Err(e) => println!("⚠️ {}", e),
+                                }
+                            }
+                        }
+                        _ => println!("call requires --server and --tool (and optional --args '<json>')."),
+                    },
+                    _ => {
+                        for srv in registry.list_servers() {
+                            println!("● {} ({} tools)", srv.server_name, srv.tools.len());
+                            for t in &srv.tools {
+                                println!("    mcp__{}__{} — {}", srv.server_name, t.name, t.description);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Commands::Cron { action, name, schedule, task, id } => {
             use open_assistant::cron::scheduler::CronScheduler;
             let config = config::load().await?;
@@ -427,7 +484,7 @@ async fn main() -> anyhow::Result<()> {
             // The `web` command IS the gateway WebChat (real agent loop) — the
             // old simulated-response demo UI was removed.
             let config = config::load().await?;
-            gateway::webchat::start_on(config, Some(port)).await?;
+            gateway::webchat::start_on(config, Some(port), None).await?;
         }
         Commands::Agents { action, name } => {
             let config = config::load().await?;
