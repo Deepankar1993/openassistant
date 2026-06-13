@@ -39,6 +39,16 @@ enum Commands {
     /// Generate the daily brief now and print it (scheduled delivery is the
     /// gateway's proactive loop — config [brief]).
     Brief,
+    /// Manage standing orders (persistent triggers in standing_orders.json).
+    #[command(alias = "orders")]
+    StandingOrders {
+        /// list | add | remove (default: list)
+        #[arg(long)] action: Option<String>,
+        /// For add: natural language, e.g. "when i mention deploy, then run ./deploy.sh"
+        #[arg(long)] text: Option<String>,
+        /// For remove: the order id (see list)
+        #[arg(long)] id: Option<String>,
+    },
     Onboard,
     Config {
         #[arg(long)] key: Option<String>,
@@ -306,6 +316,42 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     eprintln!("Could not generate the brief: {}", e);
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::StandingOrders { action, text, id } => {
+            use open_assistant::core::standing_orders::StandingOrdersEngine;
+            let config = config::load().await?;
+            let dd = &config.general.data_dir;
+            let mut engine = StandingOrdersEngine::load(dd);
+            match action.as_deref().unwrap_or("list") {
+                "add" => {
+                    let t = text.unwrap_or_default();
+                    match StandingOrdersEngine::parse_from_text(&t) {
+                        Some(order) => {
+                            let oid = order.id.clone();
+                            engine.add(order);
+                            engine.save(dd)?;
+                            println!("✅ Added standing order [{}].", &oid[..8.min(oid.len())]);
+                        }
+                        None => println!("Could not parse. Try: \"when i mention X or Y, then remember it\""),
+                    }
+                }
+                "remove" => match id {
+                    Some(i) if engine.remove(&i) => {
+                        engine.save(dd)?;
+                        println!("Removed standing order {}.", i);
+                    }
+                    _ => println!("No standing order with that id (see `standing-orders --action list`)."),
+                },
+                _ => {
+                    let orders = engine.list();
+                    if orders.is_empty() {
+                        println!("No standing orders.");
+                    }
+                    for o in orders {
+                        println!("[{}] {} (enabled={}) — {}", &o.id[..8.min(o.id.len())], o.name, o.enabled, o.description);
+                    }
                 }
             }
         }

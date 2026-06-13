@@ -270,8 +270,23 @@ impl Agent {
             .unwrap_or_default()
         };
 
+        // Standing orders: load off-thread (sync fs read), apply matched orders'
+        // safe actions (context injection + note saves; RunCommand/Webhook
+        // operator-gated inside apply_order_action).
+        let orders = {
+            let dd = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || super::standing_orders::StandingOrdersEngine::load(&dd))
+                .await
+                .unwrap_or_default()
+        };
+        let mut standing_context: Vec<String> = Vec::new();
+        let msg_count = session.messages().len();
+        for order in orders.matched(message, msg_count) {
+            self.apply_order_action(&order, message, msg_count, &mem, &mut standing_context).await;
+        }
+
         // Build full system prompt with persona + user model + memory + facts
-        let system_prompt = self.build_system_prompt(ctx, &mem, &known_facts);
+        let system_prompt = self.build_system_prompt(ctx, &mem, &known_facts, &standing_context);
 
         // Build conversation messages
         let messages = self.build_messages(&system_prompt, session);
@@ -395,6 +410,16 @@ impl Agent {
             Self::fire_hook(&hooks, super::hooks::HookEvent::Stop, hc).await;
         }
 
+        // SessionEnd standing orders (e.g. the session-summary note).
+        {
+            let count = session.messages().len();
+            for order in orders.check_session_end() {
+                if let super::standing_orders::OrderAction::SaveNote { template } = &order.action {
+                    let _ = mem.append_daily(&super::standing_orders::render_template(template, &final_response, count));
+                }
+            }
+        }
+
         // Daily note about response
         let _ = mem.append_daily(&format!("Assistant responded: {}", &final_response[..final_response.len().min(200)]));
 
@@ -407,8 +432,18 @@ impl Agent {
         ctx: &FullContext,
         mem: &super::memory::MemoryWorkspace,
         known_facts: &[String],
+        standing_context: &[String],
     ) -> String {
         let mut prompt = ctx.build_system_prompt();
+
+        // Context injected by matched standing orders this turn.
+        if !standing_context.is_empty() {
+            prompt.push_str("# Standing context\n");
+            for line in standing_context {
+                prompt.push_str(&format!("- {}\n", line));
+            }
+            prompt.push('\n');
+        }
 
         // Memory context
         let memory_ctx = mem.build_context();
@@ -883,6 +918,50 @@ impl Agent {
         match engine {
             Some(e) => e.fire(&event, &ctx).await,
             None => Vec::new(),
+        }
+    }
+
+    /// Apply one matched standing order's action. Safe actions (InjectContext,
+    /// SaveNote) run on any origin; RunCommand/Webhook run only for the local
+    /// operator; re-entrant actions are logged no-ops in v1.
+    async fn apply_order_action(
+        &self,
+        order: &super::standing_orders::StandingOrder,
+        message: &str,
+        message_count: usize,
+        mem: &super::memory::MemoryWorkspace,
+        ctx_out: &mut Vec<String>,
+    ) {
+        use super::standing_orders::{render_template, OrderAction};
+        match &order.action {
+            OrderAction::InjectContext { text } => ctx_out.push(text.clone()),
+            OrderAction::SaveNote { template } => {
+                let _ = mem.append_daily(&render_template(template, message, message_count));
+            }
+            OrderAction::RunCommand { command } => {
+                if !self.operator {
+                    tracing::warn!("standing order '{}' RunCommand skipped (remote origin)", order.name);
+                    return;
+                }
+                let (shell, flag) = super::hooks::hook_shell();
+                match tokio::process::Command::new(shell).arg(flag).arg(command).output().await {
+                    Ok(o) => info!("standing order '{}' ran (exit {:?})", order.name, o.status.code()),
+                    Err(e) => tracing::warn!("standing order '{}' command failed: {}", order.name, e),
+                }
+            }
+            OrderAction::Webhook { url, body } => {
+                if !self.operator {
+                    tracing::warn!("standing order '{}' Webhook skipped (remote origin)", order.name);
+                    return;
+                }
+                let client = reqwest::Client::new();
+                if let Err(e) = client.post(url).body(body.clone()).send().await {
+                    tracing::warn!("standing order '{}' webhook failed: {}", order.name, e);
+                }
+            }
+            other => {
+                debug!("standing order '{}' action {:?} not auto-executed in v1", order.name, std::mem::discriminant(other));
+            }
         }
     }
 
@@ -1771,6 +1850,44 @@ mod tests {
         let results = engine.fire(&HookEvent::PreToolUse, &ctx).await;
         assert_eq!(results.len(), 1);
         assert!(decide_pre_tool(&results).blocked, "the hook returned block:true");
+    }
+
+    #[tokio::test]
+    async fn standing_order_actions_inject_and_save_note() {
+        use crate::core::standing_orders::{OrderAction, OrderTrigger, StandingOrder};
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap().to_string();
+        let agent = Agent::new("m").with_workspace(ws.clone());
+        let mem = crate::core::memory::MemoryWorkspace::from_data_dir(&ws);
+        let mut ctx_out = Vec::new();
+
+        let inject = StandingOrder {
+            id: "i".into(), name: "i".into(), enabled: true,
+            trigger: OrderTrigger::Keyword { phrases: vec!["x".into()] },
+            action: OrderAction::InjectContext { text: "the user likes brevity".into() },
+            description: String::new(),
+        };
+        agent.apply_order_action(&inject, "msg", 1, &mem, &mut ctx_out).await;
+        assert_eq!(ctx_out, vec!["the user likes brevity".to_string()]);
+
+        let note = StandingOrder {
+            id: "n".into(), name: "n".into(), enabled: true,
+            trigger: OrderTrigger::Keyword { phrases: vec!["x".into()] },
+            action: OrderAction::SaveNote { template: "pref: {{message}}".into() },
+            description: String::new(),
+        };
+        agent.apply_order_action(&note, "I like tea", 2, &mem, &mut ctx_out).await;
+        assert!(mem.read_today().contains("pref: I like tea"), "SaveNote wrote to daily memory");
+
+        // RunCommand is skipped for a non-operator agent (no panic, no run).
+        let cmd = StandingOrder {
+            id: "c".into(), name: "c".into(), enabled: true,
+            trigger: OrderTrigger::Keyword { phrases: vec!["x".into()] },
+            action: OrderAction::RunCommand { command: "echo should-not-run".into() },
+            description: String::new(),
+        };
+        agent.apply_order_action(&cmd, "msg", 1, &mem, &mut ctx_out).await;
+        assert_eq!(ctx_out.len(), 1, "RunCommand on a remote agent adds no context and is skipped");
     }
 
     #[test]
