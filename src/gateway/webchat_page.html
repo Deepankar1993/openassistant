@@ -446,12 +446,178 @@ main {
   text-align: center;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   Conversation-history sidebar
+   ════════════════════════════════════════════════════════════════════ */
+:root { --sidebar-w: 260px; }
+
+/* The whole app shifts right by the sidebar width on desktop; the sidebar
+   itself is a fixed left column. On mobile it becomes off-canvas (below). */
+#sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-right: 1px solid var(--hair);
+}
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hair);
+}
+.sidebar-title {
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+/* "+ New chat" button: hairline-bordered, accent on hover */
+#new-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--hair);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+#new-chat-btn:hover { border-color: var(--accent); color: var(--accent); }
+#new-chat-btn svg.icon { width: 15px; height: 15px; }
+
+/* Scrollable conversation list */
+#conv-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.conv-empty {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px 12px;
+}
+/* A conversation row: a button (select) plus an inline delete button. */
+.conv-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius);
+  border-left: 2px solid transparent;
+}
+.conv-row:hover { background: var(--tint); }
+.conv-row.active {
+  background: var(--tint);
+  border-left-color: var(--accent);
+}
+.conv-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  text-align: left;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.conv-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.conv-time {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+/* Per-row delete: hidden until row hover/focus on desktop. */
+.conv-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0;
+}
+.conv-del svg.icon { width: 15px; height: 15px; }
+.conv-row:hover .conv-del,
+.conv-row:focus-within .conv-del { opacity: 1; }
+.conv-del:hover { color: var(--error); }
+
+/* Mobile scrim behind the off-canvas sidebar. */
+#sidebar-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(42, 38, 34, 0.4);
+  border: none;
+  display: none;
+}
+
+/* Hamburger toggle lives in the header — desktop hides it (sidebar always
+   shown), mobile shows it. */
+#menu-btn { display: none; }
+
+/* ── Desktop: fixed sidebar column, shift the rest of the app right ─── */
+@media (min-width: 720px) {
+  body { padding-left: var(--sidebar-w); }
+  /* The header is sticky; offset it so it doesn't underlap the sidebar. */
+  #sidebar-scrim { display: none !important; }
+}
+
+/* ── Mobile: off-canvas sidebar ────────────────────────────────────── */
+@media (max-width: 719.98px) {
+  #menu-btn { display: inline-flex; }
+  #sidebar {
+    transform: translateX(-100%);
+    transition: transform 200ms ease-out;
+    box-shadow: 0 0 20px rgba(42, 38, 34, 0.18);
+  }
+  body.sidebar-open #sidebar { transform: translateX(0); }
+  body.sidebar-open #sidebar-scrim { display: block; }
+  /* On mobile the delete button is always visible (no hover affordance). */
+  .conv-del { opacity: 1; }
+}
+
 /* ── Mobile ────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {
   .header-inner, main { padding-left: 16px; padding-right: 16px; }
   #composer { padding-left: 16px; padding-right: 16px; }
   .turn.user .msg-content { max-width: 92%; }
   .composer-hint { display: none; }
+}
+
+/* ── Reduced motion: don't slide the sidebar ───────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  #sidebar { transition: none; }
 }
 
 /* ── Reduced motion ────────────────────────────────────────────────── */
@@ -465,9 +631,32 @@ main {
 </head>
 <body>
 
+<!-- ── Conversation-history sidebar ─────────────────────────────────────
+     Fixed left column on desktop; off-canvas (slides over a scrim) on
+     mobile, toggled by the header hamburger. -->
+<nav id="sidebar" aria-label="Conversation history">
+  <div class="sidebar-head">
+    <h2 class="sidebar-title">Chats</h2>
+    <button id="new-chat-btn" type="button" aria-label="Start a new chat">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span>New chat</span>
+    </button>
+  </div>
+  <div id="conv-list"></div>
+</nav>
+
+<!-- Scrim sits behind the off-canvas sidebar on mobile; tap to close. -->
+<button id="sidebar-scrim" type="button" aria-label="Close conversation history" tabindex="-1"></button>
+
 <header>
   <div class="header-inner">
-    <h1 class="app-name">openAssistant</h1>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <!-- Hamburger: mobile-only sidebar toggle. -->
+      <button id="menu-btn" class="icon-btn" type="button" aria-label="Toggle conversation history" aria-expanded="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+      <h1 class="app-name">openAssistant</h1>
+    </div>
     <button id="theme-btn" class="icon-btn" type="button" aria-label="Toggle color theme">
       <!-- sun (shown in dark mode = switch to light) -->
       <svg id="icon-sun" class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -525,12 +714,20 @@ main {
   var jumpBtn = document.getElementById("jump-btn");
   var themeBtn = document.getElementById("theme-btn");
   var hljsLink = document.getElementById("hljs-theme");
+  // Sidebar handles
+  var sidebarEl = document.getElementById("sidebar");
+  var scrimEl = document.getElementById("sidebar-scrim");
+  var menuBtn = document.getElementById("menu-btn");
+  var newChatBtn = document.getElementById("new-chat-btn");
+  var convListEl = document.getElementById("conv-list");
 
   // ── App state ────────────────────────────────────────────────────
   var streaming = false;        // a turn is currently in flight
   var controller = null;        // AbortController for the active stream
   var lastUserText = null;      // last user message (for Retry)
   var following = true;         // auto-scroll follows the stream
+  var activeConvId = null;      // id of the conversation currently shown
+                                // (null = a brand-new chat with no first reply yet)
 
   var reducedMotion = window.matchMedia &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -541,7 +738,8 @@ main {
     check:   '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
     x:       '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
     chevron: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
-    copy:    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+    copy:    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    trash:   '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></svg>'
   };
 
   // ── Theme ────────────────────────────────────────────────────────
@@ -876,6 +1074,10 @@ main {
         var steps = inflight.steps;
         finishTurn(ev.text || "");
         abandonPendingTools(steps);
+        // A conversation is created lazily on the backend (it appears in the
+        // list only after its first assistant reply). Refresh so a brand-new
+        // chat shows up and the active row stays highlighted.
+        refreshConversations();
         break;
       }
 
@@ -1014,6 +1216,186 @@ main {
     });
   }
 
+  // ── Conversation-history sidebar ─────────────────────────────────
+
+  /** Toggle the off-canvas sidebar on mobile (no-op visual on desktop). */
+  function openSidebar() {
+    document.body.classList.add("sidebar-open");
+    menuBtn.setAttribute("aria-expanded", "true");
+  }
+  function closeSidebar() {
+    document.body.classList.remove("sidebar-open");
+    menuBtn.setAttribute("aria-expanded", "false");
+  }
+  menuBtn.addEventListener("click", function () {
+    if (document.body.classList.contains("sidebar-open")) closeSidebar();
+    else openSidebar();
+  });
+  scrimEl.addEventListener("click", closeSidebar);
+
+  /**
+   * Human-friendly relative time from an RFC3339 timestamp:
+   * "just now", "5m ago", "2h ago", "yesterday", "3d ago", or a date.
+   */
+  function relativeTime(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return "";
+    var diff = Date.now() - then;
+    if (diff < 0) diff = 0;
+    var min = Math.floor(diff / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return min + "m ago";
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h ago";
+    var day = Math.floor(hr / 24);
+    if (day === 1) return "yesterday";
+    if (day < 7) return day + "d ago";
+    var wk = Math.floor(day / 7);
+    if (wk < 5) return wk + "w ago";
+    // Older than a month: show a short date.
+    try { return new Date(then).toLocaleDateString(); } catch (e) { return ""; }
+  }
+
+  /** Build a single conversation row (select button + delete button). */
+  function buildConvRow(conv) {
+    var row = document.createElement("div");
+    row.className = "conv-row";
+    if (conv.id === activeConvId) {
+      row.classList.add("active");
+    }
+
+    // The main clickable area: title + relative time.
+    var sel = document.createElement("button");
+    sel.type = "button";
+    sel.className = "conv-select";
+    if (conv.id === activeConvId) sel.setAttribute("aria-current", "true");
+
+    var title = document.createElement("span");
+    title.className = "conv-title";
+    title.textContent = conv.title || "Untitled";
+    var time = document.createElement("span");
+    time.className = "conv-time";
+    time.textContent = relativeTime(conv.updated_at);
+    sel.appendChild(title);
+    sel.appendChild(time);
+    sel.addEventListener("click", function () { selectConversation(conv.id); });
+
+    // Inline delete button (trash icon).
+    var del = document.createElement("button");
+    del.type = "button";
+    del.className = "conv-del";
+    del.setAttribute("aria-label", "Delete conversation: " + (conv.title || "Untitled"));
+    del.innerHTML = ICONS.trash;
+    del.addEventListener("click", function (e) {
+      e.stopPropagation(); // don't trigger select
+      deleteConversation(conv.id, conv.title || "Untitled");
+    });
+
+    row.appendChild(sel);
+    row.appendChild(del);
+    return row;
+  }
+
+  // Cache of the last list given to renderConversations, so selectConversation
+  // can re-highlight synchronously before its async refetch lands.
+  var currentConvCache = [];
+
+  /** Render the conversation list into the sidebar. */
+  function renderConversations(list) {
+    currentConvCache = list || [];
+    convListEl.innerHTML = "";
+    if (!list || !list.length) {
+      var empty = document.createElement("div");
+      empty.className = "conv-empty";
+      empty.textContent = "No conversations yet.";
+      convListEl.appendChild(empty);
+      return;
+    }
+    for (var i = 0; i < list.length; i++) {
+      convListEl.appendChild(buildConvRow(list[i]));
+    }
+  }
+
+  /**
+   * Re-fetch the conversation list and re-highlight the active row. If
+   * activeConvId is still null (a brand-new chat that just earned its first
+   * reply), adopt the newest entry's id as active.
+   */
+  function refreshConversations() {
+    return fetch("/api/conversations")
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (list) {
+        if (activeConvId === null && list && list.length) {
+          // Newest-first ordering: the freshly-created conversation leads.
+          activeConvId = list[0].id;
+        }
+        renderConversations(list);
+      })
+      .catch(function () { /* leave list as-is on failure */ });
+  }
+
+  /** POST /select, then render the returned messages and mark active. */
+  function selectConversation(id) {
+    if (streaming) return; // don't switch mid-turn
+    fetch("/api/conversations/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: id })
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (messages) {
+        activeConvId = id;
+        messagesEl.innerHTML = "";   // clear current turns
+        renderHistory(messages);     // reuse the hydration renderer
+        renderConversations(currentConvCache); // re-highlight without refetch
+        refreshConversations();      // and refetch to stay fresh
+        closeSidebar();              // close the off-canvas sidebar on mobile
+      })
+      .catch(function () { /* ignore select failure */ });
+  }
+
+  /** confirm(), DELETE the conversation, then refresh; clear if it was active. */
+  function deleteConversation(id, title) {
+    if (!window.confirm('Delete "' + title + '"? This cannot be undone.')) return;
+    fetch("/api/conversations/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        // If the deleted conversation was the one on screen, reset to empty.
+        if (id === activeConvId) {
+          activeConvId = null;
+          messagesEl.innerHTML = "";
+          showEmptyState();
+        }
+        return refreshConversations();
+      })
+      .catch(function () { /* ignore delete failure */ });
+  }
+
+  /** "+ New chat": persist current, clear to empty state, refresh, focus. */
+  newChatBtn.addEventListener("click", function () {
+    if (streaming) return;
+    fetch("/api/conversations", { method: "POST" })
+      .then(function () {
+        // A new conversation is created lazily on the backend (no list row
+        // until the first reply), so just reset the view and re-list.
+        activeConvId = null;
+        messagesEl.innerHTML = "";
+        showEmptyState();
+        return refreshConversations();
+      })
+      .catch(function () { /* ignore */ })
+      .then(function () {
+        closeSidebar();
+        inputEl.focus();
+      });
+  });
+
   // ── History hydration ────────────────────────────────────────────
   function renderHistory(history) {
     if (!history || !history.length) { showEmptyState(); return; }
@@ -1035,6 +1417,8 @@ main {
     scrollToBottom(false);
   }
 
+  // Initial load: hydrate the active (most-recent in-memory) conversation
+  // from /api/messages, and populate the sidebar from /api/conversations.
   fetch("/api/messages")
     .then(function (res) {
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -1042,6 +1426,19 @@ main {
     })
     .then(renderHistory)
     .catch(function () { showEmptyState(); });
+
+  // Populate the sidebar. The most-recent conversation (list[0]) is what
+  // /api/messages hydrated, so adopt it as the active row if there is one.
+  fetch("/api/conversations")
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(function (list) {
+      if (list && list.length) activeConvId = list[0].id;
+      renderConversations(list);
+    })
+    .catch(function () { renderConversations([]); });
 
   updateSendDisabled();
   inputEl.focus();
