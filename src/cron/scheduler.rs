@@ -144,17 +144,25 @@ pub fn schedule_due(schedule: &str, last_run: Option<DateTime<Utc>>, now: DateTi
 
 fn parse_every(schedule: &str) -> Option<chrono::Duration> {
     let rest = schedule.trim().strip_prefix("every ")?.trim();
-    let (num, unit) = rest.split_at(rest.len().checked_sub(1)?);
-    let n: i64 = num.trim().parse().ok()?;
+    // Peel the last CHARACTER as the unit — `split_at(len-1)` would panic on a
+    // multibyte final char (e.g. "every 5µ"), and the schedule is user input.
+    let (unit_start, unit) = rest.char_indices().next_back()?;
+    let n: i64 = rest[..unit_start].trim().parse().ok()?;
     if n <= 0 {
         return None;
     }
     match unit {
-        "m" => Some(chrono::Duration::minutes(n)),
-        "h" => Some(chrono::Duration::hours(n)),
-        "d" => Some(chrono::Duration::days(n)),
+        'm' => Some(chrono::Duration::minutes(n)),
+        'h' => Some(chrono::Duration::hours(n)),
+        'd' => Some(chrono::Duration::days(n)),
         _ => None,
     }
+}
+
+/// Whether a schedule string is well-formed (`"every <N>{m,h,d}"`). Used by the
+/// CLI to reject bad input up front.
+pub fn is_valid_schedule(schedule: &str) -> bool {
+    parse_every(schedule).is_some()
 }
 
 impl Default for CronScheduler {
@@ -183,6 +191,10 @@ mod tests {
         assert!(!schedule_due("0 8 * * *", None, now));
         assert!(!schedule_due("every 0m", None, now));
         assert!(!schedule_due("nonsense", None, now));
+        // Multibyte final char must NOT panic (was a split_at hazard).
+        assert!(!schedule_due("every 5µ", None, now));
+        assert!(!schedule_due("every ☃", None, now));
+        assert!(is_valid_schedule("every 30m") && !is_valid_schedule("every 5µ"));
     }
 
     #[test]

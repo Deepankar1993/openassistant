@@ -340,9 +340,13 @@ async fn main() -> anyhow::Result<()> {
             match action.as_deref().unwrap_or("list") {
                 "add" => match (name, schedule, task) {
                     (Some(n), Some(s), Some(t)) => {
-                        let jid = scheduler.add_job(&n, &s, &t, None);
-                        scheduler.save(dd)?;
-                        println!("✅ Added cron job '{}' [{}] ({}).", n, &jid[..8.min(jid.len())], s);
+                        if !open_assistant::cron::scheduler::is_valid_schedule(&s) {
+                            println!("Invalid schedule '{}'. Use \"every <N>m|h|d\" (e.g. \"every 60m\").", s);
+                        } else {
+                            let jid = scheduler.add_job(&n, &s, &t, None);
+                            scheduler.save(dd)?;
+                            println!("✅ Added cron job '{}' [{}] ({}).", n, &jid[..8.min(jid.len())], s);
+                        }
                     }
                     _ => println!("add requires --name, --schedule (e.g. \"every 60m\"), and --task."),
                 },

@@ -48,12 +48,14 @@ async fn run_cron_step(cfg: &Config) {
     if due.is_empty() {
         return;
     }
-    if let Err(e) = scheduler.save(&cfg.general.data_dir) {
-        warn!("could not persist cron schedule: {}", e);
-    }
-    for job in due {
+    for job in &due {
         let result = run_cron_job(cfg, &job.task).await;
         post_everywhere(cfg, &format!("⏰ {}\n\n{}", job.name, result)).await;
+    }
+    // Persist AFTER running, so a save failure causes a retry next tick rather
+    // than silently dropping the run (mirrors run_brief_step's mark-on-success).
+    if let Err(e) = scheduler.save(&cfg.general.data_dir) {
+        warn!("could not persist cron schedule (jobs will re-run next tick): {}", e);
     }
 }
 
