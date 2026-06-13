@@ -57,6 +57,15 @@ openAssistant is a personal AI assistant. Everything flows through one agent loo
 
 **Tool calling is text-based, not native function calling.** The model is instructed to emit `[TOOL:name:{"arg":"value"}]`, and `parse_tool_call()` extracts it with a regex (`\[TOOL:(\w+):(\{.*?\})\]`) — one tool call per model message, but multiple rounds per turn via the loop above. When adding a tool you must update three places: the `match` in `execute_tool`, the `default_tools()` list (for the prompt), and usually `ToolRegistry::execute` in `src/tools/mod.rs`.
 
+**Lifecycle hooks fire in the loop, operator-gated.** `process_inner` fires
+`HookEngine` (`src/core/hooks.rs`, loaded from `<data_dir>/.claude/hooks/hooks.json`)
+at SessionStart / UserPromptSubmit / PreToolUse / PostToolUse(+Failure) / Stop. A
+`PreToolUse` hook can block a tool (the result becomes a `⛔` message the model adapts
+to) or rewrite its `modified_input`. Hooks run arbitrary shell, so they fire ONLY for
+`Agent.operator == true` (set via `.operator()` by the CLI/TUI/desktop) — never for
+gateway-channel or sub-agent turns. `load_hooks()` returns `None` otherwise and nothing
+shells out.
+
 **Permissions are enforced in the loop (origin-aware).** `Agent.permission_mode` defaults to `BypassPermissions` for local front-ends (TUI/desktop keep full autonomy once tools are enabled); gateway channels construct agents with `permissions.gateway_mode` from config (default `acceptEdits`). Config `[permissions]` `allow`/`ask`/`deny` rules (Claude-Code-style, incl. `Bash(git *)` wildcards) apply at **every** mode — deny beats bypass; `Ask` resolves to a refusal text returned to the model (the agent is headless). The `task` tool spawns a real in-process sub-agent with a scoped tool list and depth limit 1.
 
 ### Context assembled into every prompt (`src/core/persona.rs`)
