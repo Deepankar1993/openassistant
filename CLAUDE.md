@@ -62,6 +62,16 @@ openAssistant is a personal AI assistant. Everything flows through one agent loo
 ### Context assembled into every prompt (`src/core/persona.rs`)
 `FullContext` = `Persona` (the agent's identity/principles/boundaries, OpenClaw "SOUL.md" style) + `UserModel` (built up over time, Hermes "Honcho" style) + session stats. `build_system_prompt()` renders all of it to markdown.
 
+### "What I know about you" — durable user facts (`src/memory/store.rs`)
+The `MemoryStore` SQLite `entries` table (FTS5) holds discrete, persisted, per-item
+facts about the user. The agent writes them via the `remember` tool (add/list/forget);
+`build_system_prompt` injects the top 20 by importance as a `# What I know about you`
+section so the agent actually uses them; the desktop Memory view shows a panel to add /
+edit / one-click-forget facts (`list/add/update/delete_user_fact` commands). Use
+`MemoryStore::open_in(&data_dir)` (sync) — it honors the configured data dir, unlike the
+older `open_default` which hardcodes `~/.openassistant`. (The in-memory `UserModel` in
+`FullContext` is separate, auto-learned, and still NOT persisted — a known follow-up.)
+
 ### Conversation history (`src/core/conversation_store.rs`)
 Both chat surfaces persist switchable, named conversations to
 `<data_dir>/conversations.db` (SQLite, the `discord_store` pattern). The

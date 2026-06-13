@@ -431,6 +431,21 @@
             <p class="subtitle">Your stored knowledge and daily notes</p>
           </div>
         </header>
+        <!-- What I know about you — facts panel -->
+        <section class="facts-panel" data-testid="facts-panel" aria-labelledby="facts-heading">
+          <div class="facts-head">
+            <h2 id="facts-heading" class="facts-title">What I know about you</h2>
+            <p class="facts-subtitle">Facts your assistant remembers across conversations.</p>
+          </div>
+          <div class="facts-add">
+            <label class="sr-only" for="facts-add-input">Add something to remember</label>
+            <input type="text" id="facts-add-input" data-testid="facts-add-input"
+              placeholder="Add something to remember…" autocomplete="off" />
+            <button class="btn small primary" id="facts-add-btn" data-testid="facts-add-btn" type="button">Add</button>
+          </div>
+          <ul class="facts-list" id="facts-list" data-testid="facts-list" role="list" aria-label="Remembered facts"></ul>
+        </section>
+
         <div class="panel-layout">
           <div class="panel-left" id="memory-panel-left">
             <div class="panel-search">

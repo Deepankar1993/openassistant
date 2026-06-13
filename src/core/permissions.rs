@@ -84,8 +84,9 @@ impl PermissionMode {
             // mode, so they fire even here). Use Default mode to refuse shell
             // outright on headless channels.
             "bash" | "shell" => PermissionAction::Allow,
-            // Watchers only read public URLs + write their own state file.
-            "watch" | "web_search" => PermissionAction::Allow,
+            // Watchers read public URLs + write their state file; remember writes
+            // the local memory db. Both low-risk and local.
+            "watch" | "web_search" | "remember" => PermissionAction::Allow,
             _ => PermissionAction::Ask(format!("Allow tool '{}' to run?", tool)),
         }
     }
@@ -101,6 +102,8 @@ impl PermissionMode {
             "bash" | "shell" => PermissionAction::Allow, // Simplified — real classifier is more nuanced
             // Network: allow
             "web_search" | "web_fetch" | "watch" => PermissionAction::Allow,
+            // Local memory write.
+            "remember" => PermissionAction::Allow,
             // Default: ask
             _ => PermissionAction::Ask(format!("Auto-classifier: allow '{}'?", tool)),
         }

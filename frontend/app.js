@@ -70,6 +70,12 @@
       { name: "daily-plan", description: "Help plan your day.", category: "productivity", is_builtin: true, content: "# daily-plan\n\nHelp create a prioritized plan for the day.\n" },
     ],
     agents: [],
+    // "What I know about you" facts (most-important/most-recent first).
+    facts: [
+      { id: 1, key: "name", value: "Prefers to be called by their first name.", category: "preference", source: "manual", created_at: new Date(Date.now() - 86400000 * 3).toISOString(), updated_at: new Date(Date.now() - 86400000 * 3).toISOString(), importance: 0.9 },
+      { id: 2, key: "work", value: "Works on a Rust desktop assistant project.", category: "fact", source: "chat", created_at: new Date(Date.now() - 3600000 * 2).toISOString(), updated_at: new Date(Date.now() - 3600000 * 2).toISOString(), importance: 0.6 },
+    ],
+    factSeq: 2,
     persona: {
       name: "openAssistant",
       emoji: "🦞",
@@ -260,6 +266,38 @@
         if (!q) return mockState.memoryFiles.slice();
         return mockState.memoryFiles.filter(([n, e]) => n.toLowerCase().includes(q) || e.toLowerCase().includes(q));
       }
+
+      // ── User facts ──
+      case "list_user_facts":
+        return mockState.facts
+          .slice()
+          .sort((a, b) => (b.importance || 0) - (a.importance || 0));
+      case "add_user_fact": {
+        const now = new Date().toISOString();
+        mockState.facts.push({
+          id: ++mockState.factSeq,
+          key: "",
+          value: args.value || "",
+          category: args.category || "fact",
+          source: "manual",
+          created_at: now,
+          updated_at: now,
+          importance: typeof args.importance === "number" ? args.importance : 0.6,
+        });
+        return null;
+      }
+      case "update_user_fact": {
+        const f = mockState.facts.find((x) => x.id === args.id);
+        if (f) {
+          if (args.value !== undefined && args.value !== null) f.value = args.value;
+          if (typeof args.importance === "number") f.importance = args.importance;
+          f.updated_at = new Date().toISOString();
+        }
+        return null;
+      }
+      case "delete_user_fact":
+        mockState.facts = mockState.facts.filter((x) => x.id !== args.id);
+        return null;
 
       // ── Skills ──
       case "list_skills":
@@ -1450,6 +1488,7 @@
   let memoryIsEditable = false;
 
   async function loadMemoryView() {
+    loadFactsView();
     try {
       const files = await backend("search_memory_files", { query: "" });
       renderMemoryList(files);
@@ -1563,6 +1602,196 @@
         renderMemoryList(files);
       } catch (_) {}
     }, 300);
+  });
+
+  // ── What I know about you (facts) ─────────────────
+  // Inline icons in the shared OAIcons stroke style.
+  function pencilIcon() {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+  }
+
+  // float → "high" / "medium" / "low"
+  function importanceLabel(v) {
+    const n = typeof v === "number" ? v : 0;
+    if (n >= 0.7) return "high";
+    if (n >= 0.4) return "medium";
+    return "low";
+  }
+
+  const factsList = $("#facts-list");
+
+  async function loadFactsView() {
+    let facts = [];
+    try {
+      const res = await backend("list_user_facts", {});
+      if (Array.isArray(res)) facts = res;
+    } catch (_) {
+      facts = [];
+    }
+    renderFactsList(facts);
+  }
+
+  function renderFactsList(facts) {
+    if (!factsList) return;
+    factsList.innerHTML = "";
+    if (!facts.length) {
+      const empty = document.createElement("li");
+      empty.className = "facts-empty";
+      empty.setAttribute("role", "listitem");
+      empty.textContent =
+        "Nothing remembered yet — your assistant will save facts as you chat, or add one above.";
+      factsList.appendChild(empty);
+      return;
+    }
+    facts.forEach((f) => factsList.appendChild(renderFactRow(f)));
+  }
+
+  function renderFactRow(f) {
+    const li = document.createElement("li");
+    li.className = "fact-item";
+    li.dataset.testid = "fact-item";
+    li.dataset.id = f.id;
+    li.setAttribute("role", "listitem");
+
+    const main = document.createElement("div");
+    main.className = "fact-main";
+    const value = document.createElement("div");
+    value.className = "fact-value";
+    value.dataset.testid = "fact-value";
+    value.textContent = f.value || "";
+    const meta = document.createElement("div");
+    meta.className = "fact-meta";
+    const chip = document.createElement("span");
+    chip.className = "fact-chip";
+    chip.textContent = f.category || "fact";
+    const sub = document.createElement("span");
+    sub.className = "fact-sub";
+    sub.textContent = importanceLabel(f.importance) + " · " + relativeTime(f.updated_at);
+    meta.appendChild(chip);
+    meta.appendChild(sub);
+    main.appendChild(value);
+    main.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "fact-actions";
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "fact-icon-btn";
+    editBtn.dataset.testid = "fact-edit";
+    editBtn.setAttribute("aria-label", "Edit fact");
+    editBtn.innerHTML = pencilIcon(); // static markup
+    editBtn.addEventListener("click", () => startEditFact(li, f));
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "fact-icon-btn danger";
+    delBtn.dataset.testid = "fact-forget";
+    delBtn.setAttribute("aria-label", "Forget fact");
+    delBtn.innerHTML = trashIcon(); // static markup
+    delBtn.addEventListener("click", () => forgetFact(f.id));
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+
+    li.appendChild(main);
+    li.appendChild(actions);
+    return li;
+  }
+
+  // Turn a fact row into an inline edit form (value + importance + Save/Cancel).
+  function startEditFact(li, f) {
+    li.innerHTML = "";
+    li.classList.add("editing");
+    const wrap = document.createElement("div");
+    wrap.className = "fact-edit";
+
+    const row = document.createElement("div");
+    row.className = "fact-edit-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.dataset.testid = "fact-edit-input";
+    input.value = f.value || "";
+    input.setAttribute("aria-label", "Edit fact value");
+    const sel = document.createElement("select");
+    sel.dataset.testid = "fact-edit-importance";
+    sel.setAttribute("aria-label", "Importance");
+    [["high", "0.9"], ["medium", "0.6"], ["low", "0.3"]].forEach(([label, val]) => {
+      const opt = document.createElement("option");
+      opt.value = val;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    });
+    sel.value = importanceLabel(f.importance) === "high" ? "0.9"
+      : importanceLabel(f.importance) === "low" ? "0.3" : "0.6";
+    row.appendChild(input);
+    row.appendChild(sel);
+
+    const acts = document.createElement("div");
+    acts.className = "fact-edit-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "btn small primary";
+    saveBtn.dataset.testid = "fact-edit-save";
+    saveBtn.textContent = "Save";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn small";
+    cancelBtn.dataset.testid = "fact-edit-cancel";
+    cancelBtn.textContent = "Cancel";
+    acts.appendChild(saveBtn);
+    acts.appendChild(cancelBtn);
+
+    const commit = async () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      try {
+        await backend("update_user_fact", { id: f.id, value, importance: parseFloat(sel.value) });
+        await loadFactsView();
+      } catch (err) {
+        showToast(typeof err === "string" ? err : "Failed to update fact", true);
+      }
+    };
+    saveBtn.addEventListener("click", commit);
+    cancelBtn.addEventListener("click", () => loadFactsView());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      if (e.key === "Escape") { e.preventDefault(); loadFactsView(); }
+    });
+
+    wrap.appendChild(row);
+    wrap.appendChild(acts);
+    li.appendChild(wrap);
+    input.focus();
+  }
+
+  async function forgetFact(id) {
+    if (!confirm("Forget this?")) return;
+    try {
+      await backend("delete_user_fact", { id });
+      await loadFactsView();
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to forget fact", true);
+    }
+  }
+
+  async function addFact() {
+    const input = $("#facts-add-input");
+    if (!input) return;
+    const value = input.value.trim();
+    if (!value) { input.focus(); return; }
+    try {
+      await backend("add_user_fact", { value });
+      input.value = "";
+      await loadFactsView();
+      input.focus();
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to add fact", true);
+    }
+  }
+
+  const factsAddBtn = $("#facts-add-btn");
+  if (factsAddBtn) factsAddBtn.addEventListener("click", addFact);
+  const factsAddInput = $("#facts-add-input");
+  if (factsAddInput) factsAddInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addFact(); }
   });
 
   // ── Skills view ───────────────────────────────────

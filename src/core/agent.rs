@@ -219,8 +219,23 @@ impl Agent {
         // Learn from conversation
         ctx.observe(message);
 
-        // Build full system prompt with persona + user model + memory
-        let system_prompt = self.build_system_prompt(ctx, &mem);
+        // Load the durable "what I know about you" facts off the async thread
+        // (a sync SQLite open per turn would otherwise block the executor).
+        // Best-effort: a missing/locked store yields no facts.
+        let known_facts: Vec<String> = {
+            let dir = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::memory::store::MemoryStore::open_in(&dir)
+                    .and_then(|s| s.list_all(20))
+                    .map(|facts| facts.into_iter().map(|f| f.value).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        // Build full system prompt with persona + user model + memory + facts
+        let system_prompt = self.build_system_prompt(ctx, &mem, &known_facts);
 
         // Build conversation messages
         let messages = self.build_messages(&system_prompt, session);
@@ -309,7 +324,12 @@ impl Agent {
     }
 
     /// Build full system prompt with persona, user model, memory, and tool instructions
-    fn build_system_prompt(&self, ctx: &FullContext, mem: &super::memory::MemoryWorkspace) -> String {
+    fn build_system_prompt(
+        &self,
+        ctx: &FullContext,
+        mem: &super::memory::MemoryWorkspace,
+        known_facts: &[String],
+    ) -> String {
         let mut prompt = ctx.build_system_prompt();
 
         // Memory context
@@ -317,6 +337,17 @@ impl Agent {
         if !memory_ctx.is_empty() {
             prompt.push_str("# Memory\n");
             prompt.push_str(&memory_ctx);
+            prompt.push('\n');
+        }
+
+        // Durable, per-item facts about the user (the "what I know about you"
+        // store), loaded off-thread by the caller and injected so the agent
+        // actually uses what it has remembered.
+        if !known_facts.is_empty() {
+            prompt.push_str("# What I know about you\n");
+            for value in known_facts {
+                prompt.push_str(&format!("- {}\n", value));
+            }
             prompt.push('\n');
         }
 
@@ -331,6 +362,7 @@ impl Agent {
             }
             prompt.push('\n');
             push_str(&mut prompt, "After you emit a tool call, STOP — the tool result will be sent back to you as a [TOOL RESULT: name] message, and you can then continue or emit the next tool call. One tool call per message.");
+            push_str(&mut prompt, "When you learn a durable fact about the user (a preference, an ongoing project, important personal context), save it with [TOOL:remember:{\"action\":\"add\",\"value\":\"...\"}] so you still know it next time.");
 
             // Self-management instructions
             push_str(&mut prompt, "# Self-Management");
@@ -553,6 +585,7 @@ impl Agent {
                 Ok(format!("Vision result:\n{}", result.output))
             }
             "watch" => self.handle_watch(&tool_call.arguments).await,
+            "remember" => self.handle_remember(&tool_call.arguments).await,
             "memory" => {
                 self.handle_memory_tool(&tool_call.arguments, mem).await
             }
@@ -733,6 +766,77 @@ impl Agent {
                 }
             }
             _ => Ok(store.format_list()),
+        }
+    }
+
+    /// Durable, per-item facts about the user (the "what I know about you"
+    /// store, surfaced in the desktop Memory panel and injected into the system
+    /// prompt). Persisted in `<data_dir>/memory.db` via `MemoryStore`.
+    async fn handle_remember(&self, args: &serde_json::Value) -> Result<String> {
+        let action = args["action"].as_str().unwrap_or("add");
+        let store = match crate::memory::store::MemoryStore::open_in(&self.workspace_dir) {
+            Ok(s) => s,
+            Err(e) => return Ok(format!("remember: could not open memory store: {}", e)),
+        };
+        match action {
+            "add" => {
+                let value = args["value"].as_str().unwrap_or("").trim();
+                if value.is_empty() {
+                    return Ok("remember add: provide a 'value' (the fact to remember).".to_string());
+                }
+                let key = match args["key"].as_str() {
+                    Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+                    _ => derive_fact_key(value),
+                };
+                let category = args["category"].as_str().unwrap_or("fact");
+                let importance = args["importance"].as_f64().unwrap_or(0.6);
+                let entry = crate::memory::store::MemoryEntry::new(
+                    key.clone(),
+                    value,
+                    category,
+                    "agent",
+                    importance,
+                );
+                match store.store(&entry) {
+                    Ok(_) => Ok(format!("🧠 Remembered [{}]: {}", key, value)),
+                    Err(e) => Ok(format!("remember: could not save: {}", e)),
+                }
+            }
+            "list" => match store.list_all(50) {
+                Ok(facts) if facts.is_empty() => Ok("I don't have any saved facts yet.".to_string()),
+                Ok(facts) => {
+                    let mut out = String::from("What I remember about you (forget by id or key):\n");
+                    for f in &facts {
+                        out.push_str(&format!(
+                            "- [id={} key={}] {} ({:.1})\n",
+                            f.id.unwrap_or(0), f.key, f.value, f.importance
+                        ));
+                    }
+                    Ok(out)
+                }
+                Err(e) => Ok(format!("remember list: {}", e)),
+            },
+            "forget" => {
+                // Prefer a precise id (from `list`); fall back to key. Note that
+                // key-based delete removes every fact sharing that derived key.
+                if let Some(id) = args["id"].as_i64() {
+                    return Ok(match store.delete_by_id(id) {
+                        Ok(0) => format!("No saved fact with id {}.", id),
+                        Ok(_) => format!("Forgot fact [id={}].", id),
+                        Err(e) => format!("remember forget: {}", e),
+                    });
+                }
+                let key = args["key"].as_str().unwrap_or("").trim();
+                if key.is_empty() {
+                    return Ok("remember forget: provide an 'id' or 'key' to forget (see action=list).".to_string());
+                }
+                match store.delete(key) {
+                    Ok(0) => Ok(format!("No saved fact with key '{}'.", key)),
+                    Ok(n) => Ok(format!("Forgot {} fact(s) with key '{}'.", n, key)),
+                    Err(e) => Ok(format!("remember forget: {}", e)),
+                }
+            }
+            _ => Ok(format!("Unknown remember action '{}'. Use add | list | forget.", action)),
         }
     }
 
@@ -1070,6 +1174,11 @@ impl Agent {
                 parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}, "url": {"type": "string"}, "note": {"type": "string"}, "interval_minutes": {"type": "integer"}}}),
             },
             ToolDefinition {
+                name: "remember".to_string(),
+                description: "Save, list, or forget a durable fact about the user (persists across restarts; shown in their memory panel). Args: {\"action\": \"add|list|forget\", \"value\": \"the fact\", \"key\": \"<optional handle>\", \"id\": <from list, for precise forget>, \"category\": \"fact|preference\", \"importance\": 0.6}".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}, "value": {"type": "string"}, "key": {"type": "string"}, "id": {"type": "integer"}, "category": {"type": "string"}, "importance": {"type": "number"}}}),
+            },
+            ToolDefinition {
                 name: "web_search".to_string(),
                 description: "Multi-source web search. Args: {\"query\": \"...\", \"engine\": \"duckduckgo|brave|google\"}".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}, "engine": {"type": "string"}}}),
@@ -1089,6 +1198,8 @@ fn push_str(buf: &mut String, s: &str) {
 /// engine, and goal deliberation — each passes its own (shared) `reqwest::Client`
 /// and the resolved provider credentials/model. Surfaces transport/HTTP errors
 /// instead of silently returning an empty string.
+use crate::memory::store::fact_key as derive_fact_key;
+
 /// Cap tool output before feeding it back into the context window.
 fn truncate_output(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -1382,6 +1493,46 @@ mod tests {
         let bad = ToolCall { name: "watch".into(), arguments: serde_json::json!({"action": "add", "url": "file:///etc/passwd"}) };
         let out = agent.execute_tool(&bad, &mut ctx, &mut session, &mem).await.unwrap();
         assert!(out.contains("http(s)"), "{}", out);
+    }
+
+    #[test]
+    fn derive_fact_key_slugs_first_words() {
+        assert_eq!(derive_fact_key("Prefers concise answers"), "prefers-concise-answers");
+        assert_eq!(derive_fact_key("Works in Rust & Tauri, mostly!"), "works-in-rust-tauri-mostly");
+        assert_eq!(derive_fact_key("!!!"), "fact");
+        assert!(derive_fact_key("one two three four five six seven").split('-').count() <= 5);
+    }
+
+    #[tokio::test]
+    async fn remember_tool_add_list_forget_via_execute_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent = Agent::new("m").with_workspace(dir.path().to_str().unwrap().to_string());
+        let mut ctx = crate::core::persona::FullContext::new();
+        let mut session = crate::core::session::Session::new("test", "test");
+        let mem = crate::core::memory::MemoryWorkspace::from_data_dir(dir.path().to_str().unwrap());
+
+        let add = ToolCall {
+            name: "remember".into(),
+            arguments: serde_json::json!({"action": "add", "value": "Prefers concise answers", "importance": 0.8}),
+        };
+        let out = agent.execute_tool(&add, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("Remembered"), "{}", out);
+
+        let list = ToolCall { name: "remember".into(), arguments: serde_json::json!({"action": "list"}) };
+        let out = agent.execute_tool(&list, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("Prefers concise answers"), "{}", out);
+
+        let forget = ToolCall {
+            name: "remember".into(),
+            arguments: serde_json::json!({"action": "forget", "key": "prefers-concise-answers"}),
+        };
+        let out = agent.execute_tool(&forget, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("Forgot"), "{}", out);
+
+        // Missing value on add is handled, not panicked.
+        let bad = ToolCall { name: "remember".into(), arguments: serde_json::json!({"action": "add"}) };
+        let out = agent.execute_tool(&bad, &mut ctx, &mut session, &mem).await.unwrap();
+        assert!(out.contains("provide a 'value'"), "{}", out);
     }
 
     #[test]

@@ -112,8 +112,10 @@ pub async fn get_history(state: State<'_, AppCore>) -> Result<Vec<Message>, Stri
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_status(state: State<'_, AppCore>) -> Result<StatusResponse, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
-    // Best-effort memory metrics: a missing/locked DB must not fail the status call.
-    let memory_db_entries = match MemoryStore::open_default().await {
+    // Best-effort memory metrics: a missing/locked DB must not fail the status
+    // call. Use the configured data dir (open_in) so it matches where the
+    // facts panel and the agent read/write memory.db.
+    let memory_db_entries = match MemoryStore::open_in(&cfg.general.data_dir) {
         Ok(store) => store.count().unwrap_or(0),
         Err(_) => 0,
     };

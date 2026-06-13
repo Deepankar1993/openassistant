@@ -1,11 +1,19 @@
-//! Memory-browser commands — all backed by the real `MemoryWorkspace` file I/O.
+//! Memory-browser commands. The markdown notes (`MEMORY.md`, daily files) are
+//! backed by `MemoryWorkspace` file I/O; the discrete "what I know about you"
+//! facts are backed by the `MemoryStore` SQLite db (`<data_dir>/memory.db`).
 
 use open_assistant::config;
 use open_assistant::core::memory::MemoryWorkspace;
+use open_assistant::memory::store::{fact_key, MemoryEntry, MemoryStore};
 
 async fn workspace() -> Result<MemoryWorkspace, String> {
     let cfg = config::load().await.map_err(|e| e.to_string())?;
     Ok(MemoryWorkspace::from_data_dir(&cfg.general.data_dir))
+}
+
+async fn facts_store() -> Result<MemoryStore, String> {
+    let cfg = config::load().await.map_err(|e| e.to_string())?;
+    MemoryStore::open_in(&cfg.general.data_dir).map_err(|e| e.to_string())
 }
 
 /// Long-term curated memory (`MEMORY.md`).
@@ -35,4 +43,49 @@ pub async fn search_memory_files(query: String) -> Result<Vec<[String; 2]>, Stri
         .into_iter()
         .map(|(name, excerpt)| [name, excerpt])
         .collect())
+}
+
+// ── "What I know about you" — durable per-item facts (MemoryStore) ──
+
+/// All remembered facts, most important / most recent first.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_user_facts() -> Result<Vec<MemoryEntry>, String> {
+    facts_store().await?.list_all(200).map_err(|e| e.to_string())
+}
+
+/// Add a fact the user typed themselves (source = "manual").
+#[tauri::command(rename_all = "snake_case")]
+pub async fn add_user_fact(
+    value: String,
+    category: Option<String>,
+    importance: Option<f64>,
+) -> Result<(), String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err("A fact can't be empty.".into());
+    }
+    let entry = MemoryEntry::new(
+        fact_key(&value),
+        value,
+        category.unwrap_or_else(|| "fact".to_string()),
+        "manual",
+        importance.unwrap_or(0.6),
+    );
+    facts_store().await?.store(&entry).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Edit a fact's text and importance.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn update_user_fact(id: i64, value: String, importance: f64) -> Result<(), String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err("A fact can't be empty.".into());
+    }
+    facts_store().await?.update(id, &value, importance).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// One-click forget.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn delete_user_fact(id: i64) -> Result<(), String> {
+    facts_store().await?.delete_by_id(id).map(|_| ()).map_err(|e| e.to_string())
 }

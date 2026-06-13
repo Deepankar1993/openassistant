@@ -660,6 +660,96 @@ code, pre, kbd, samp { font-family: var(--font-mono); font-size: 13px; }
   max-width: 760px;
 }
 
+/* ── What I know about you (facts panel) ─────────── */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.facts-panel {
+  flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+.facts-head { display: flex; flex-direction: column; gap: 2px; }
+.facts-title {
+  font-family: var(--font-serif);
+  font-size: 18px; font-weight: 600; letter-spacing: -0.01em;
+}
+.facts-subtitle { font-size: 13px; color: var(--text-muted); }
+.facts-add { display: flex; gap: 8px; align-items: center; max-width: 620px; }
+.facts-add input {
+  flex: 1; padding: 9px 12px; font: inherit; font-size: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-secondary); color: var(--text-primary); outline: none;
+  transition: border-color .12s, box-shadow .12s;
+}
+.facts-add input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--focus-ring); }
+.facts-list {
+  list-style: none; display: flex; flex-direction: column; gap: 6px;
+  max-height: 240px; overflow-y: auto; max-width: 760px;
+}
+.facts-empty {
+  font-size: 13px; color: var(--text-muted); line-height: 1.5;
+  padding: 8px 2px;
+}
+.fact-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg-primary);
+  transition: border-color .12s, background .12s;
+}
+.fact-item:hover { background: var(--bg-secondary); }
+.fact-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.fact-value {
+  font-size: 14px; color: var(--text-primary); line-height: 1.5;
+  word-wrap: break-word; overflow-wrap: anywhere;
+}
+.fact-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fact-chip {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; background: var(--tint); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: 11px; font-family: var(--font-mono);
+}
+.fact-sub { font-size: 11px; color: var(--text-muted); }
+.fact-actions {
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px;
+  opacity: 0; transition: opacity .12s;
+}
+.fact-item:hover .fact-actions,
+.fact-item:focus-within .fact-actions { opacity: 1; }
+.fact-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: none; background: transparent;
+  border-radius: var(--radius); cursor: pointer; color: var(--text-muted);
+  transition: background .12s, color .12s;
+}
+.fact-icon-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.fact-icon-btn.danger:hover { background: var(--danger-light); color: var(--danger); }
+.fact-icon-btn svg { display: block; }
+/* Always show controls on narrow widths */
+@media (max-width: 720px) {
+  .fact-actions { opacity: 1; }
+}
+/* Inline edit row */
+.fact-edit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.fact-edit-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.fact-edit input[type="text"] {
+  flex: 1; min-width: 160px; padding: 7px 10px; font: inherit; font-size: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-secondary); color: var(--text-primary); outline: none;
+  transition: border-color .12s, box-shadow .12s;
+}
+.fact-edit input[type="text"]:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--focus-ring); }
+.fact-edit select {
+  padding: 7px 10px; font: inherit; font-size: 13px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-secondary); color: var(--text-primary); outline: none;
+}
+.fact-edit-actions { display: flex; gap: 8px; }
+
 /* ── Skills pane ─────────────────────────────────── */
 .skills-content {
   flex: 1; display: flex; flex-direction: column; padding: 24px; overflow-y: auto;
