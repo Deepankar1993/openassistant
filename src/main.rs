@@ -344,6 +344,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Mcp { action, server, tool, args } => {
+            // Local operator CLI: full autonomy (like `claude`). `mcp call` runs
+            // a tool directly, outside the agent's permission gate — the remote
+            // gateway path keeps the gate (MCP tools need an allow rule there).
             use open_assistant::core::mcp::McpRegistry;
             let config = config::load().await?;
             let mut registry = McpRegistry::open_default(&config.general.data_dir)?;

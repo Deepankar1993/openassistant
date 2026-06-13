@@ -1286,8 +1286,10 @@ impl Agent {
     }
 
     fn parse_tool_call(&self, text: &str) -> Option<ToolCall> {
-        let re = regex::Regex::new(r"\[TOOL:(\w+):(\{.*?\})\]").ok()?;
-        re.captures(text).map(|caps| ToolCall {
+        // Compiled once — this runs every tool-loop iteration.
+        static RE: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"\[TOOL:(\w+):(\{.*?\})\]").unwrap());
+        RE.captures(text).map(|caps| ToolCall {
             name: caps[1].to_string(),
             arguments: serde_json::from_str(&caps[2]).unwrap_or(serde_json::json!({})),
         })

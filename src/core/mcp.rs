@@ -61,7 +61,11 @@ struct StdioConn {
 
 impl Drop for StdioConn {
     fn drop(&mut self) {
+        // Kill the server and best-effort reap so a long-running gateway that
+        // replaces servers doesn't accumulate zombies (try_wait is non-blocking;
+        // catches the common already-exited case).
         let _ = self.child.start_kill();
+        let _ = self.child.try_wait();
     }
 }
 
@@ -73,6 +77,8 @@ pub struct McpClient {
     initialized: bool,
     /// Live stdio process (None for HTTP servers / before init).
     conn: Option<Arc<Mutex<StdioConn>>>,
+    /// Reused for HTTP transport (connection pooling).
+    http: reqwest::Client,
 }
 
 impl McpClient {
@@ -83,6 +89,7 @@ impl McpClient {
             tools: Vec::new(),
             initialized: false,
             conn: None,
+            http: reqwest::Client::new(),
         }
     }
 
@@ -185,7 +192,7 @@ impl McpClient {
         let url = self.config.url.as_ref()
             .ok_or_else(|| anyhow::anyhow!("HTTP transport requires a URL"))?;
         let req = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let resp = reqwest::Client::new()
+        let resp = self.http
             .post(url)
             .header("Content-Type", "application/json")
             .json(&req)
