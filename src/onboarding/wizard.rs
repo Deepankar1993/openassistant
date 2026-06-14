@@ -98,6 +98,7 @@ pub async fn run_wizard() -> Result<()> {
             webhook_host: String::new(),
             webhook_port: 3000,
             dm_policy: if dm_pairing { "pairing".to_string() } else { "open".to_string() },
+            ..Default::default()
         },
         memory: crate::config::MemoryConfig {
             db_path: format!("{}/memory.db", data_dir),

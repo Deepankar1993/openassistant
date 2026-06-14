@@ -212,9 +212,14 @@ impl Default for ModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub discord_token: String,
+    #[serde(default)]
     pub discord_allowed_users: Vec<String>,
     /// Optional "home" channel id: top-level messages here auto-spawn a thread
     /// (Hermes-style), even without an @mention. Set via the `set home` command.
@@ -224,6 +229,22 @@ pub struct GatewayConfig {
     /// channel (0 = disabled).
     #[serde(default)]
     pub discord_review_hours: u64,
+    /// Status-reaction lifecycle on inbound messages: 👀 while working →
+    /// ✅ on success / ❌ on error (Hermes-style). Set false to disable.
+    #[serde(default = "default_true")]
+    pub discord_reactions: bool,
+    /// When true (default), the bot only answers guild messages that @mention
+    /// it. When false, it answers every message in a guild channel.
+    #[serde(default = "default_true")]
+    pub discord_require_mention: bool,
+    /// Channel ids where the bot answers WITHOUT an @mention and replies inline
+    /// (no auto-thread) — lightweight free-response chat rooms.
+    #[serde(default)]
+    pub discord_free_response_channels: Vec<String>,
+    /// In shared (free-response) channels, isolate conversation history per user
+    /// (Hermes default) instead of one shared room-wide conversation.
+    #[serde(default = "default_true")]
+    pub discord_group_sessions_per_user: bool,
     pub telegram_token: String,
     pub slack_token: String,
     pub slack_signing_secret: String,
@@ -233,6 +254,27 @@ pub struct GatewayConfig {
     pub webhook_host: String,
     pub webhook_port: u16,
     pub dm_policy: String, // "pairing" or "open"
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            discord_token: String::new(),
+            discord_allowed_users: Vec::new(),
+            discord_home_channel: String::new(),
+            discord_review_hours: 0,
+            discord_reactions: true,
+            discord_require_mention: true,
+            discord_free_response_channels: Vec::new(),
+            discord_group_sessions_per_user: true,
+            telegram_token: String::new(),
+            slack_token: String::new(),
+            slack_signing_secret: String::new(),
+            webhook_host: String::new(),
+            webhook_port: 0,
+            dm_policy: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +389,18 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
             config.gateway.discord_review_hours = value
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid hours '{}' (expected a non-negative integer)", value))?
+        }
+        "gateway.discord_reactions" => {
+            config.gateway.discord_reactions = value.parse().unwrap_or(true)
+        }
+        "gateway.discord_require_mention" => {
+            config.gateway.discord_require_mention = value.parse().unwrap_or(true)
+        }
+        "gateway.discord_free_response_channels" => {
+            config.gateway.discord_free_response_channels = split_list(value)
+        }
+        "gateway.discord_group_sessions_per_user" => {
+            config.gateway.discord_group_sessions_per_user = value.parse().unwrap_or(true)
         }
         "gateway.webhook_host" => config.gateway.webhook_host = value.to_string(),
         "gateway.webhook_port" => {
@@ -586,6 +640,36 @@ vision:
         let legacy = "general:\n  data_dir: /tmp/oa\nmodel:\n  provider: openrouter\n  model: m\n  api_key: ''\n  api_base: https://x\ngateway:\n  discord_token: ''\n  discord_allowed_users: []\n  telegram_token: ''\n  slack_token: ''\n  slack_signing_secret: ''\n  webhook_port: 0\n  dm_policy: open\nmemory:\n  db_path: /tmp/oa/m.db\n  max_entries: 1\n  fts_enabled: false\nskills:\n  dirs: []\n  auto_create: false\nsecurity:\n  dm_pairing: false\n  allow_from: []\nvision:\n  provider: g\n  gemini_path: g\n";
         let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
         assert!(!cfg3.brief.enabled);
+    }
+
+    #[test]
+    fn gateway_discord_interaction_defaults_and_round_trip() {
+        // New Hermes-parity toggles default ON (manual Default, not derived).
+        let cfg = Config::default();
+        assert!(cfg.gateway.discord_reactions);
+        assert!(cfg.gateway.discord_require_mention);
+        assert!(cfg.gateway.discord_group_sessions_per_user);
+        assert!(cfg.gateway.discord_free_response_channels.is_empty());
+
+        let mut cfg2 = Config::default();
+        cfg2.gateway.discord_reactions = false;
+        cfg2.gateway.discord_require_mention = false;
+        cfg2.gateway.discord_free_response_channels = vec!["123".into(), "456".into()];
+        cfg2.gateway.discord_group_sessions_per_user = false;
+        let yaml = serde_yaml::to_string(&cfg2).expect("serialize");
+        let back: Config = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert!(!back.gateway.discord_reactions);
+        assert!(!back.gateway.discord_require_mention);
+        assert!(!back.gateway.discord_group_sessions_per_user);
+        assert_eq!(back.gateway.discord_free_response_channels, vec!["123", "456"]);
+
+        // Legacy gateway block (no new keys) loads with the toggles defaulting ON.
+        let legacy = "general:\n  data_dir: /tmp/oa\nmodel:\n  provider: openrouter\n  model: m\n  api_key: ''\n  api_base: https://x\ngateway:\n  discord_token: ''\n  discord_allowed_users: []\n  telegram_token: ''\n  slack_token: ''\n  slack_signing_secret: ''\n  webhook_port: 0\n  dm_policy: open\nmemory:\n  db_path: /tmp/oa/m.db\n  max_entries: 1\n  fts_enabled: false\nskills:\n  dirs: []\n  auto_create: false\nsecurity:\n  dm_pairing: false\n  allow_from: []\nvision:\n  provider: g\n  gemini_path: g\n";
+        let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
+        assert!(cfg3.gateway.discord_reactions);
+        assert!(cfg3.gateway.discord_require_mention);
+        assert!(cfg3.gateway.discord_group_sessions_per_user);
+        assert!(cfg3.gateway.discord_free_response_channels.is_empty());
     }
 
     #[test]
