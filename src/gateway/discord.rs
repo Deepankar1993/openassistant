@@ -1,9 +1,16 @@
 // src/gateway/discord.rs
 //! Discord gateway (Hermes-style) via `serenity`.
 //!
-//! - **@mention** the bot (or post in the **home** channel) → react ✅, spawn a
+//! - **@mention** the bot (or post in the **home** channel) → spawn a
 //!   **thread**, reply inside it. Messages inside a bot-owned thread continue
 //!   that conversation. **DMs** are answered directly.
+//! - **Status reactions** (Hermes-style): 👀 while working → ✅ on success /
+//!   ❌ on error. Toggle with `gateway.discord_reactions`.
+//! - **Free-response channels** (`gateway.discord_free_response_channels`): the
+//!   bot answers inline without an @mention and skips threading. Per-user vs
+//!   shared history there is controlled by `gateway.discord_group_sessions_per_user`.
+//! - **`gateway.discord_require_mention = false`** makes the bot answer every
+//!   guild message (not just @mentions).
 //! - **Slash commands**: `/ask`, `/home`, `/unset_home`, `/new`, `/help`
 //!   (registered per-guild on connect). Text commands still work too.
 //! - **Persistence**: owned threads + each conversation's `Session` are stored
@@ -49,6 +56,14 @@ struct Handler {
     allowed_users: Vec<String>,
     dm_policy: String,
     data_dir: String,
+    /// 👀→✅/❌ status-reaction lifecycle on inbound messages.
+    reactions: bool,
+    /// When false, the bot answers every guild message (not just @mentions).
+    require_mention: bool,
+    /// Channels answered without a mention, replied inline (no auto-thread).
+    free_response: HashSet<u64>,
+    /// Per-user history isolation inside free-response channels.
+    group_per_user: bool,
 }
 
 impl Handler {
@@ -108,8 +123,23 @@ impl Handler {
         reply
     }
 
-    async fn react_ack(&self, ctx: &SerenityContext, msg: &DiscordMessage) {
-        let _ = msg.react(&ctx.http, ReactionType::Unicode("✅".to_string())).await;
+    /// Add 👀 to signal "I'm working on it" (Hermes-style). Best-effort.
+    async fn react_start(&self, ctx: &SerenityContext, msg: &DiscordMessage) {
+        if self.reactions {
+            let _ = msg.react(&ctx.http, ReactionType::Unicode("👀".to_string())).await;
+        }
+    }
+
+    /// Remove our 👀 and stamp the outcome: ✅ on success, ❌ on error. Best-effort.
+    async fn react_finish(&self, ctx: &SerenityContext, msg: &DiscordMessage, ok: bool) {
+        if !self.reactions {
+            return;
+        }
+        let _ = msg
+            .delete_reaction(&ctx.http, None, ReactionType::Unicode("👀".to_string()))
+            .await;
+        let emoji = if ok { "✅" } else { "❌" };
+        let _ = msg.react(&ctx.http, ReactionType::Unicode(emoji.to_string())).await;
     }
 
     async fn send_chunked(&self, ctx: &SerenityContext, channel: ChannelId, text: &str) {
@@ -205,46 +235,61 @@ impl EventHandler for Handler {
         }
 
         let channel_id = msg.channel_id.get();
+        let user_id = msg.author.id.get();
         let is_dm = msg.guild_id.is_none();
+        let in_thread = self.threads.lock().await.contains(&channel_id);
+        let is_free = !is_dm && !in_thread && self.free_response.contains(&channel_id);
 
-        if is_dm {
-            self.react_ack(&ctx, &msg).await;
-            let reply = self.respond(channel_id, &content).await;
-            self.send_chunked(&ctx, msg.channel_id, &reply).await;
-            return;
-        }
+        // @mention / home lookups only matter on the channel-level guild path —
+        // skip the extra HTTP call for DMs, threads, and free-response channels.
+        let (mentioned, in_home) = if is_dm || in_thread || is_free {
+            (false, false)
+        } else {
+            let mentioned = msg.mentions_me(&ctx.http).await.unwrap_or(false);
+            let in_home = *self.home_channel.lock().await == Some(channel_id);
+            (mentioned, in_home)
+        };
 
-        if self.threads.lock().await.contains(&channel_id) {
-            self.react_ack(&ctx, &msg).await;
-            let reply = self.respond(channel_id, &content).await;
-            self.send_chunked(&ctx, msg.channel_id, &reply).await;
-            return;
-        }
-
-        let mentioned = msg.mentions_me(&ctx.http).await.unwrap_or(false);
-        let in_home = *self.home_channel.lock().await == Some(channel_id);
-        if mentioned || in_home {
-            self.react_ack(&ctx, &msg).await;
-            let title = thread_title(&content);
-            match msg
-                .channel_id
-                .create_thread_from_message(&ctx.http, msg.id, CreateThread::new(title.clone()))
-                .await
-            {
-                Ok(thread) => {
-                    let tid = thread.id.get();
-                    self.threads.lock().await.insert(tid);
-                    {
-                        let store = self.store.lock().await;
-                        let _ = store.mark_thread(tid, &title);
+        match decide_action(is_dm, in_thread, is_free, mentioned, in_home, self.require_mention) {
+            Action::Ignore => {}
+            Action::Direct => {
+                // DMs and threads are already 1:1 / per-conversation; free-response
+                // rooms fold the user id in (per Hermes' per-user default).
+                let conv = if is_free {
+                    conv_key_for(channel_id, user_id, self.group_per_user)
+                } else {
+                    channel_id
+                };
+                self.react_start(&ctx, &msg).await;
+                let reply = self.respond(conv, &content).await;
+                self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
+                self.send_chunked(&ctx, msg.channel_id, &reply).await;
+            }
+            Action::Thread => {
+                self.react_start(&ctx, &msg).await;
+                let title = thread_title(&content);
+                match msg
+                    .channel_id
+                    .create_thread_from_message(&ctx.http, msg.id, CreateThread::new(title.clone()))
+                    .await
+                {
+                    Ok(thread) => {
+                        let tid = thread.id.get();
+                        self.threads.lock().await.insert(tid);
+                        {
+                            let store = self.store.lock().await;
+                            let _ = store.mark_thread(tid, &title);
+                        }
+                        let reply = self.respond(tid, &content).await;
+                        self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
+                        self.send_chunked(&ctx, thread.id, &reply).await;
                     }
-                    let reply = self.respond(tid, &content).await;
-                    self.send_chunked(&ctx, thread.id, &reply).await;
-                }
-                Err(e) => {
-                    warn!("Could not create thread ({}); replying in channel.", e);
-                    let reply = self.respond(channel_id, &content).await;
-                    self.send_chunked(&ctx, msg.channel_id, &reply).await;
+                    Err(e) => {
+                        warn!("Could not create thread ({}); replying in channel.", e);
+                        let reply = self.respond(channel_id, &content).await;
+                        self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
+                        self.send_chunked(&ctx, msg.channel_id, &reply).await;
+                    }
                 }
             }
         }
@@ -370,6 +415,12 @@ pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::
     }
 
     let home = config.gateway.discord_home_channel.trim().parse::<u64>().ok();
+    let free_response: HashSet<u64> = config
+        .gateway
+        .discord_free_response_channels
+        .iter()
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .collect();
 
     // Build the Claude bridge if enabled, injecting persona + a human tone so
     // replies feel like a friendly teammate rather than a task runner.
@@ -416,6 +467,10 @@ pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::
             config.gateway.dm_policy.clone()
         },
         data_dir: config.general.data_dir.clone(),
+        reactions: config.gateway.discord_reactions,
+        require_mention: config.gateway.discord_require_mention,
+        free_response,
+        group_per_user: config.gateway.discord_group_sessions_per_user,
     };
 
     // GUILDS is needed so `ready.guilds` is populated for per-guild slash-command
@@ -538,6 +593,61 @@ pub fn is_allowed(user_id: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|id| id == user_id || id == "*")
 }
 
+/// How to handle an inbound message once gating + commands are out of the way.
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// Don't respond.
+    Ignore,
+    /// Reply inline in the same channel (DMs, threads, free-response rooms).
+    Direct,
+    /// Spawn a thread off the message and reply inside it.
+    Thread,
+}
+
+/// Decide what to do with a message. Pure so it's unit-testable without Discord.
+/// DMs, in-thread messages, and free-response channels always get a direct reply;
+/// other guild messages spawn a thread when triggered (@mention, home channel, or
+/// `require_mention = false`), else are ignored.
+fn decide_action(
+    is_dm: bool,
+    in_thread: bool,
+    is_free_response: bool,
+    mentioned: bool,
+    in_home: bool,
+    require_mention: bool,
+) -> Action {
+    if is_dm || in_thread || is_free_response {
+        return Action::Direct;
+    }
+    if mentioned || in_home || !require_mention {
+        return Action::Thread;
+    }
+    Action::Ignore
+}
+
+/// Whether a reply string is one of the agent/bridge error messages (which are
+/// prefixed with the ⚠️ warning sign) — used to pick the ✅/❌ status reaction.
+fn is_error_reply(reply: &str) -> bool {
+    reply.trim_start().starts_with('⚠')
+}
+
+/// Conversation key for a channel-level reply. With per-user isolation (the
+/// Hermes default) the user id is folded in so each speaker keeps private
+/// history in a shared room; otherwise the whole channel shares one
+/// conversation. The high bit is set so synthesized keys never collide with
+/// real Discord snowflake ids (which are < 2^63).
+fn conv_key_for(channel_id: u64, user_id: u64, per_user: bool) -> u64 {
+    if !per_user {
+        return channel_id;
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    channel_id.hash(&mut h);
+    user_id.hash(&mut h);
+    h.finish() | (1u64 << 63)
+}
+
 fn chunk_message(s: &str) -> Vec<String> {
     if s.trim().is_empty() {
         return vec!["(empty response)".to_string()];
@@ -601,5 +711,47 @@ mod tests {
         let chunks = chunk_message(&big);
         assert!(chunks.len() >= 3);
         assert!(chunks.iter().all(|c| c.len() <= DISCORD_MAX_LEN));
+    }
+
+    #[test]
+    fn decide_action_routes_each_origin() {
+        // DM / thread / free-response always reply inline.
+        assert_eq!(decide_action(true, false, false, false, false, true), Action::Direct);
+        assert_eq!(decide_action(false, true, false, false, false, true), Action::Direct);
+        assert_eq!(decide_action(false, false, true, false, false, true), Action::Direct);
+
+        // Guild channel: thread on mention or home, else ignore when mention required.
+        assert_eq!(decide_action(false, false, false, true, false, true), Action::Thread);
+        assert_eq!(decide_action(false, false, false, false, true, true), Action::Thread);
+        assert_eq!(decide_action(false, false, false, false, false, true), Action::Ignore);
+
+        // require_mention = false → answer everything (via a thread).
+        assert_eq!(decide_action(false, false, false, false, false, false), Action::Thread);
+    }
+
+    #[test]
+    fn is_error_reply_detects_warning_prefix() {
+        assert!(is_error_reply("⚠️ something broke"));
+        assert!(is_error_reply("  ⚠️ leading space"));
+        assert!(!is_error_reply("All good ✅"));
+        assert!(!is_error_reply(""));
+    }
+
+    #[test]
+    fn conv_key_per_user_isolates_and_avoids_snowflake_collision() {
+        let chan = 100u64;
+        // Shared mode: every user maps to the channel id.
+        assert_eq!(conv_key_for(chan, 1, false), chan);
+        assert_eq!(conv_key_for(chan, 2, false), chan);
+
+        // Per-user mode: distinct users get distinct, stable keys.
+        let a = conv_key_for(chan, 1, true);
+        let b = conv_key_for(chan, 2, true);
+        assert_ne!(a, b);
+        assert_eq!(a, conv_key_for(chan, 1, true)); // deterministic
+
+        // High bit set ⇒ never collides with a real snowflake (< 2^63).
+        assert!(a >= (1u64 << 63));
+        assert!(b >= (1u64 << 63));
     }
 }
