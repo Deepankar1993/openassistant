@@ -33,6 +33,7 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
+use super::attachments;
 use super::discord_store::DiscordStore;
 use crate::config::Config;
 use crate::core::agent::{call_llm_raw, Agent};
@@ -64,6 +65,9 @@ struct Handler {
     free_response: HashSet<u64>,
     /// Per-user history isolation inside free-response channels.
     group_per_user: bool,
+    /// When true, text-like message attachments are downloaded and their text
+    /// folded into the conversation content.
+    attachments_enabled: bool,
 }
 
 impl Handler {
@@ -226,13 +230,24 @@ impl EventHandler for Handler {
         if !gate(&msg.author.id.get().to_string(), &self.allowed_users, &self.dm_policy) {
             return;
         }
-        let content = msg.content.trim().to_string();
-        if content.is_empty() {
+        // Typed message text — commands match on this alone (not attachments).
+        let typed = msg.content.trim().to_string();
+        if self.try_command(&ctx, &msg, &typed).await {
             return;
         }
-        if self.try_command(&ctx, &msg, &content).await {
+
+        // Fold text-like attachments into the effective conversation content. A
+        // bare attachment-only message still gets answered; a truly empty one
+        // (no text AND no usable attachments) is ignored.
+        let attach_text = if self.attachments_enabled {
+            attachments::extract_attachments(&msg).await
+        } else {
+            String::new()
+        };
+        if typed.is_empty() && attach_text.is_empty() {
             return;
         }
+        let content = format!("{}{}", typed, attach_text);
 
         let channel_id = msg.channel_id.get();
         let user_id = msg.author.id.get();
@@ -471,6 +486,7 @@ pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::
         require_mention: config.gateway.discord_require_mention,
         free_response,
         group_per_user: config.gateway.discord_group_sessions_per_user,
+        attachments_enabled: config.gateway.discord_attachments_enabled,
     };
 
     // GUILDS is needed so `ready.guilds` is populated for per-guild slash-command
