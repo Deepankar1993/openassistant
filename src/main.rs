@@ -96,11 +96,13 @@ enum Commands {
         #[arg(long)] action: Option<String>,
         #[arg(long)] content: Option<String>,
     },
-    /// List/read/create skills
+    /// List/read/create/run skills
     Skills {
         #[arg(long)] action: Option<String>,
         #[arg(long)] name: Option<String>,
         #[arg(long)] content: Option<String>,
+        /// Free-form input passed to a skill run (e.g. `skills run research a query`).
+        #[arg(trailing_var_arg = true)] input: Vec<String>,
     },
     /// Manage sub-agents
     Agents {
@@ -290,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Skills { action, name, content } => {
+        Commands::Skills { action, name, content, input } => {
             let config = config::load().await?;
             let dir = &config.general.data_dir;
 
@@ -320,11 +322,42 @@ async fn main() -> anyhow::Result<()> {
                         println!("Created skill: {}", n);
                     }
                 }
+                // `skills run <name> [input...]` — clap parses `run` as the first
+                // trailing word, so handle both `--action run` and bare `run`.
+                _ if action.as_deref() == Some("run")
+                    || (action.is_none() && input.first().map(|s| s.as_str()) == Some("run")) =>
+                {
+                    // Drop a leading bare "run" token, then take the skill name
+                    // from --name or the next trailing word; the rest is input.
+                    let mut rest = input.iter();
+                    if action.as_deref() != Some("run") {
+                        rest.next(); // consume the "run" token
+                    }
+                    let skill_name = name.clone().or_else(|| rest.next().cloned());
+                    let skill_name = match skill_name {
+                        Some(n) => n,
+                        None => {
+                            println!("Usage: openassistant skills run <name> [input...]");
+                            return Ok(());
+                        }
+                    };
+                    let skill_input = rest.cloned().collect::<Vec<_>>().join(" ");
+
+                    let agent = open_assistant::core::agent::Agent::new(config.model.model.clone())
+                        .with_workspace(dir.clone())
+                        .with_tools_enabled(config.tools.enabled)
+                        .operator();
+                    match agent.run_skill(&skill_name, &skill_input).await {
+                        Ok(out) => println!("{}", out),
+                        Err(e) => println!("⚠️ {}", e),
+                    }
+                }
                 _ => {
                     println!("Skill commands:");
                     println!("  openassistant skills --action list");
                     println!("  openassistant skills --action read --name SKILL.md");
                     println!("  openassistant skills --action create --name SKILL.md --content \"text\"");
+                    println!("  openassistant skills --action run --name research \"your input\"");
                 }
             }
         }
