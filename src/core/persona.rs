@@ -118,6 +118,55 @@ pub struct UserModel {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl UserModel {
+    /// Path to the persisted user-model file under the data dir.
+    pub fn user_model_path(data_dir: &str) -> PathBuf {
+        PathBuf::from(format!("{}/user_model.json", data_dir))
+    }
+
+    /// Load the persisted user model, falling back to the default if absent/invalid.
+    pub fn load_or_default(data_dir: &str) -> Self {
+        let path = Self::user_model_path(data_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(m) => {
+                    debug!("Loaded user model from {}", path.display());
+                    m
+                }
+                Err(e) => {
+                    info!("user_model.json present but unreadable ({e}); using default");
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Persist the user model to `<data_dir>/user_model.json`.
+    pub fn save(&self, data_dir: &str) -> anyhow::Result<()> {
+        let path = Self::user_model_path(data_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        debug!("Saved user model to {}", path.display());
+        Ok(())
+    }
+
+    /// True when nothing has been learned yet (matches a fresh `default()`):
+    /// no name learned, default technical level, and no interests/projects/notes.
+    /// Used to decide whether to hydrate from disk without clobbering an
+    /// already-populated in-memory model.
+    pub fn is_empty(&self) -> bool {
+        self.name == "User"
+            && self.what_to_call_them == "friend"
+            && self.technical_level == "intermediate"
+            && self.interests.is_empty()
+            && self.projects.is_empty()
+            && self.notes.is_empty()
+    }
+}
+
 impl Default for UserModel {
     fn default() -> Self {
         Self {
@@ -276,5 +325,79 @@ fn push_json_section(buf: &mut String, title: &str, val: &serde_json::Value) {
             buf.push('\n');
         }
         buf.push('\n');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a unique temp data dir and clean it up when dropped.
+    struct TempDir(String);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            let unique = format!(
+                "oa_usermodel_{}_{}_{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            p.push(unique);
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p.to_string_lossy().into_owned())
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn user_model_save_load_round_trip() {
+        let dir = TempDir::new("roundtrip");
+
+        let mut model = UserModel::default();
+        model.name = "Sam".to_string();
+        model.what_to_call_them = "Sam".to_string();
+        model.technical_level = "advanced".to_string();
+        model.interests = vec!["rust".to_string(), "music".to_string()];
+        model.projects = vec!["openAssistant".to_string()];
+        model.notes = vec!["likes concise answers".to_string()];
+
+        model.save(&dir.0).expect("save should succeed");
+
+        let loaded = UserModel::load_or_default(&dir.0);
+        assert_eq!(loaded.name, "Sam");
+        assert_eq!(loaded.what_to_call_them, "Sam");
+        assert_eq!(loaded.technical_level, "advanced");
+        assert_eq!(loaded.interests, vec!["rust".to_string(), "music".to_string()]);
+        assert_eq!(loaded.projects, vec!["openAssistant".to_string()]);
+        assert_eq!(loaded.notes, vec!["likes concise answers".to_string()]);
+    }
+
+    #[test]
+    fn load_or_default_when_absent() {
+        let dir = TempDir::new("absent");
+        // No file written — should fall back to default and be empty.
+        let loaded = UserModel::load_or_default(&dir.0);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn is_empty_reflects_learning() {
+        let model = UserModel::default();
+        assert!(model.is_empty(), "fresh default should be empty");
+
+        let mut ctx = FullContext::new();
+        ctx.observe("my name is Sam");
+        assert!(
+            !ctx.user.is_empty(),
+            "after learning a name + note the model is no longer empty"
+        );
     }
 }
