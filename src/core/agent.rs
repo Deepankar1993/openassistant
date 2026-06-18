@@ -1017,6 +1017,24 @@ impl Agent {
                     tracing::warn!("standing order '{}' webhook failed: {}", order.name, e);
                 }
             }
+            OrderAction::RunSkill { skill_name } => {
+                // A skill runs a sub-agent that can invoke tools, so gate it like
+                // RunCommand/Webhook: operator only. Best-effort — never panic the
+                // loop; push any textual result into the injected context.
+                if !self.operator {
+                    tracing::warn!("standing order '{}' RunSkill skipped (remote origin)", order.name);
+                    return;
+                }
+                match self.run_skill(skill_name, message).await {
+                    Ok(text) => {
+                        info!("standing order '{}' ran skill '{}'", order.name, skill_name);
+                        ctx_out.push(format!("# Skill '{}' result\n{}", skill_name, text));
+                    }
+                    Err(e) => {
+                        tracing::warn!("standing order '{}' RunSkill '{}' failed: {}", order.name, skill_name, e);
+                    }
+                }
+            }
             other => {
                 debug!("standing order '{}' action {:?} not auto-executed in v1", order.name, std::mem::discriminant(other));
             }
@@ -1161,6 +1179,75 @@ impl Agent {
         match result {
             Ok(text) => Ok(format!("🤖 Sub-agent ({}) result:\n{}", subagent_type, text)),
             Err(e) => Ok(format!("Sub-agent ({}) failed: {}", subagent_type, e)),
+        }
+    }
+
+    /// Run a named skill through a scoped, depth-limited in-process sub-agent.
+    ///
+    /// Reuses the exact sub-agent mechanism `handle_task_tool` uses: a child
+    /// `Agent` with `depth = self.depth + 1`, a filtered tool list, and the
+    /// recursive `Box::pin(child.process(...))` call — so depth-limiting, scoped
+    /// tools, permission posture, and non-operator gating all apply identically.
+    ///
+    /// The skill is loaded by name from the built-ins plus `<workspace>/skills/`.
+    /// Its `content` becomes the instruction portion of the prompt and `input`
+    /// the task. Tools are scoped to the skill's `allowed_tools` minus its
+    /// `disallowed_tools`; a skill that names no tools falls back to the same
+    /// read-only default list the `task` tool uses.
+    pub async fn run_skill(&self, skill_name: &str, input: &str) -> Result<String> {
+        if self.depth >= 1 {
+            return Ok("Skill refused: nested sub-agents are not allowed (depth limit 1).".to_string());
+        }
+
+        // Load built-ins + user skills from the configured workspace skills dir.
+        let mut engine = crate::skills::engine::SkillEngine::load_builtin()
+            .unwrap_or_default();
+        let _ = engine.load_from_dir(&format!("{}/skills", self.workspace_dir));
+
+        let skill = match engine.get(skill_name) {
+            Some(s) => s.clone(),
+            None => {
+                let known: Vec<&str> = engine.list().iter().map(|s| s.name.as_str()).collect();
+                return Err(anyhow::anyhow!(
+                    "skill '{}' not found (known: {})",
+                    skill_name,
+                    if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                ));
+            }
+        };
+
+        // Default scoped list mirrors `handle_task_tool`'s read-only fallback.
+        let default_tools = vec![
+            "read".to_string(),
+            "glob".to_string(),
+            "grep".to_string(),
+        ];
+        let tools = effective_skill_tools(
+            &default_tools,
+            skill.allowed_tools.as_deref(),
+            skill.disallowed_tools.as_deref(),
+        );
+
+        info!(
+            "Running skill '{}' via sub-agent ({} tool(s) scoped)",
+            skill.name,
+            tools.len()
+        );
+
+        let mut child = Agent::new(self.model.clone())
+            .with_workspace(self.workspace_dir.clone())
+            .with_permission_mode(self.permission_mode);
+        child.depth = self.depth + 1;
+        child.tools = Self::filtered_tools(&tools);
+
+        let mut child_ctx = super::persona::FullContext::new();
+        let mut child_session = super::session::Session::new("skill", "local");
+        let skill_prompt = compose_skill_prompt(&skill.name, &skill.content, input);
+
+        let result = Box::pin(child.process(&skill_prompt, &mut child_ctx, &mut child_session)).await;
+        match result {
+            Ok(text) => Ok(text),
+            Err(e) => Err(anyhow::anyhow!("skill '{}' failed: {}", skill_name, e)),
         }
     }
 
@@ -1446,6 +1533,54 @@ impl Agent {
 fn push_str(buf: &mut String, s: &str) {
     buf.push_str(s);
     buf.push('\n');
+}
+
+/// Compute the effective tool list for a skill sub-agent from a base list and
+/// the skill's allow/deny sets.
+///
+/// - If `allowed` is `Some` and non-empty, the result is the intersection of
+///   `base` and `allowed` (the skill narrows the available tools).
+/// - If `allowed` is `None` or empty, `base` is used as-is (sensible default).
+/// - `disallowed` tools are then subtracted from whatever remains.
+///
+/// Order from `base` is preserved. Pure (no I/O) so it is unit-testable.
+fn effective_skill_tools(
+    base: &[String],
+    allowed: Option<&[String]>,
+    disallowed: Option<&[String]>,
+) -> Vec<String> {
+    let mut tools: Vec<String> = match allowed {
+        Some(a) if !a.is_empty() => base
+            .iter()
+            .filter(|t| a.iter().any(|x| x == *t))
+            .cloned()
+            .collect(),
+        _ => base.to_vec(),
+    };
+    if let Some(deny) = disallowed {
+        tools.retain(|t| !deny.iter().any(|d| d == t));
+    }
+    tools
+}
+
+/// Compose the sub-agent prompt for a skill from its instruction `content` and
+/// the caller's `input`. The skill body is the instruction/system portion; the
+/// input is the concrete task. Pure (no I/O) so it is unit-testable.
+fn compose_skill_prompt(skill_name: &str, content: &str, input: &str) -> String {
+    let task = if input.trim().is_empty() {
+        "(no specific input provided — follow the skill instructions)".to_string()
+    } else {
+        input.trim().to_string()
+    };
+    format!(
+        "You are executing the '{name}' skill. Follow these skill instructions exactly, \
+         then report your result as your final message.\n\n\
+         # Skill instructions\n{content}\n\n\
+         # Task input\n{task}",
+        name = skill_name,
+        content = content.trim(),
+        task = task,
+    )
 }
 
 /// Make a single chat-completions call to an OpenAI-compatible endpoint.
@@ -1957,5 +2092,60 @@ mod tests {
         let cut = truncate_output(&long, 51); // 51 is mid-char
         assert!(cut.starts_with(&"é".repeat(25)));
         assert!(cut.contains("truncated"));
+    }
+
+    fn sv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn effective_skill_tools_defaults_to_base_when_no_allowlist() {
+        let base = sv(&["read", "glob", "grep"]);
+        // None allowed → base unchanged
+        assert_eq!(effective_skill_tools(&base, None, None), base);
+        // Empty allowed → treated as "no restriction" → base unchanged
+        assert_eq!(effective_skill_tools(&base, Some(&[]), None), base);
+    }
+
+    #[test]
+    fn effective_skill_tools_intersects_allowlist() {
+        let base = sv(&["read", "glob", "grep", "bash"]);
+        let allowed = sv(&["read", "bash", "write"]); // "write" not in base
+        // Intersection of base ∩ allowed, base order preserved.
+        assert_eq!(
+            effective_skill_tools(&base, Some(&allowed), None),
+            sv(&["read", "bash"])
+        );
+    }
+
+    #[test]
+    fn effective_skill_tools_subtracts_disallowed() {
+        let base = sv(&["read", "glob", "grep", "bash"]);
+        let disallowed = sv(&["bash"]);
+        assert_eq!(
+            effective_skill_tools(&base, None, Some(&disallowed)),
+            sv(&["read", "glob", "grep"])
+        );
+        // Disallowed wins even over an explicit allow.
+        let allowed = sv(&["read", "bash"]);
+        assert_eq!(
+            effective_skill_tools(&base, Some(&allowed), Some(&disallowed)),
+            sv(&["read"])
+        );
+    }
+
+    #[test]
+    fn compose_skill_prompt_contains_content_and_input() {
+        let p = compose_skill_prompt("research", "Search broadly then synthesize.", "find rust crates");
+        assert!(p.contains("research"), "prompt names the skill: {}", p);
+        assert!(p.contains("Search broadly then synthesize."), "prompt carries the skill content: {}", p);
+        assert!(p.contains("find rust crates"), "prompt carries the input: {}", p);
+    }
+
+    #[test]
+    fn compose_skill_prompt_handles_empty_input() {
+        let p = compose_skill_prompt("writing", "Draft and edit prose.", "   ");
+        assert!(p.contains("Draft and edit prose."));
+        assert!(p.contains("no specific input"), "empty input gets a placeholder: {}", p);
     }
 }
