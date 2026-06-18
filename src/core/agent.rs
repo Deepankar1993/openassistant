@@ -1140,6 +1140,26 @@ impl Agent {
         tools
     }
 
+    /// Build a depth-limited child agent for a sub-agent (`task`) or skill run,
+    /// scoped to `tools`.
+    ///
+    /// The child inherits the parent's model, workspace, permission posture and
+    /// tools-enabled flag. It deliberately stays **non-operator**: lifecycle
+    /// hooks and the operator-gated standing-order actions must NEVER fire for
+    /// sub-agent turns — only top-level local front-ends opt in via `.operator()`.
+    /// Do not propagate `operator` here; doing so would let a sub-agent execute
+    /// host shell via hooks. (`subagents_inherit_posture_but_stay_non_operator`
+    /// guards this.)
+    fn child_agent(&self, tools: &[String]) -> Agent {
+        let mut child = Agent::new(self.model.clone())
+            .with_workspace(self.workspace_dir.clone())
+            .with_permission_mode(self.permission_mode)
+            .with_tools_enabled(self.tools_enabled);
+        child.depth = self.depth + 1;
+        child.tools = Self::filtered_tools(tools);
+        child
+    }
+
     async fn handle_task_tool(&self, args: &serde_json::Value) -> Result<String> {
         if self.depth >= 1 {
             return Ok("Sub-agent refused: nested sub-agents are not allowed (depth limit 1).".to_string());
@@ -1161,12 +1181,7 @@ impl Agent {
             _ => "general-purpose agent for multi-step work that requires reasoning and tool use",
         };
 
-        let mut child = Agent::new(self.model.clone())
-            .with_workspace(self.workspace_dir.clone())
-            .with_permission_mode(self.permission_mode)
-            .with_tools_enabled(self.tools_enabled);
-        child.depth = self.depth + 1;
-        child.tools = Self::filtered_tools(&tools);
+        let child = self.child_agent(&tools);
 
         let mut child_ctx = super::persona::FullContext::new();
         let mut child_session = super::session::Session::new("subagent", "local");
@@ -1242,12 +1257,7 @@ impl Agent {
             tools.len()
         );
 
-        let mut child = Agent::new(self.model.clone())
-            .with_workspace(self.workspace_dir.clone())
-            .with_permission_mode(self.permission_mode)
-            .with_tools_enabled(self.tools_enabled);
-        child.depth = self.depth + 1;
-        child.tools = Self::filtered_tools(&tools);
+        let child = self.child_agent(&tools);
 
         let mut child_ctx = super::persona::FullContext::new();
         let mut child_session = super::session::Session::new("skill", "local");
@@ -2167,6 +2177,26 @@ mod tests {
             effective_skill_tools(&base, &valid, Some(&allowed), Some(&deny_caps)),
             sv(&["read"])
         );
+    }
+
+    #[test]
+    fn subagents_inherit_posture_but_stay_non_operator() {
+        // A trusted, operator-enabled parent (a local front-end)...
+        let parent = Agent::new("test-model")
+            .with_workspace("/tmp/oa".to_string())
+            .with_tools_enabled(true)
+            .operator();
+        assert!(parent.operator);
+
+        // ...spawns a child the same way run_skill / handle_task_tool do.
+        let child = parent.child_agent(&["read".to_string()]);
+
+        // Posture (tools-enabled) and depth-limiting are inherited...
+        assert!(child.tools_enabled, "child inherits the parent's tools-enabled posture");
+        assert_eq!(child.depth, parent.depth + 1, "child is depth-limited");
+        // ...but operator MUST NOT propagate (hooks/shell must not fire for
+        // sub-agent turns). Regression guard for a rejected review suggestion.
+        assert!(!child.operator, "sub-agents must stay non-operator by design");
     }
 
     #[test]
