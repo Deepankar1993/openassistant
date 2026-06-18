@@ -1163,7 +1163,8 @@ impl Agent {
 
         let mut child = Agent::new(self.model.clone())
             .with_workspace(self.workspace_dir.clone())
-            .with_permission_mode(self.permission_mode);
+            .with_permission_mode(self.permission_mode)
+            .with_tools_enabled(self.tools_enabled);
         child.depth = self.depth + 1;
         child.tools = Self::filtered_tools(&tools);
 
@@ -1222,8 +1223,15 @@ impl Agent {
             "glob".to_string(),
             "grep".to_string(),
         ];
+        // Validate skill-declared tool names against the real tool set (the
+        // allowlist defines the scope; unknown names are dropped). Names are
+        // matched case-insensitively so Claude-style `[Read, Edit]` frontmatter
+        // works against our lowercase tool names.
+        let valid_tools: Vec<String> =
+            Self::default_tools().into_iter().map(|t| t.name).collect();
         let tools = effective_skill_tools(
             &default_tools,
+            &valid_tools,
             skill.allowed_tools.as_deref(),
             skill.disallowed_tools.as_deref(),
         );
@@ -1236,7 +1244,8 @@ impl Agent {
 
         let mut child = Agent::new(self.model.clone())
             .with_workspace(self.workspace_dir.clone())
-            .with_permission_mode(self.permission_mode);
+            .with_permission_mode(self.permission_mode)
+            .with_tools_enabled(self.tools_enabled);
         child.depth = self.depth + 1;
         child.tools = Self::filtered_tools(&tools);
 
@@ -1535,31 +1544,39 @@ fn push_str(buf: &mut String, s: &str) {
     buf.push('\n');
 }
 
-/// Compute the effective tool list for a skill sub-agent from a base list and
-/// the skill's allow/deny sets.
+/// Compute the effective tool list for a skill sub-agent.
 ///
-/// - If `allowed` is `Some` and non-empty, the result is the intersection of
-///   `base` and `allowed` (the skill narrows the available tools).
-/// - If `allowed` is `None` or empty, `base` is used as-is (sensible default).
-/// - `disallowed` tools are then subtracted from whatever remains.
+/// - If `allowed` is `Some` and non-empty, the skill's allowlist *defines* the
+///   scope: each name is lowercased and kept only if it's a real tool (present
+///   in `valid`). This lets a skill opt into tools beyond the read-only base.
+/// - If `allowed` is `None`/empty, the read-only `base` is used as the default.
+/// - `disallowed` names (also lowercased) are then subtracted.
 ///
-/// Order from `base` is preserved. Pure (no I/O) so it is unit-testable.
+/// All matching is case-insensitive so Claude-style capitalized frontmatter
+/// (`[Read, Edit]`) works against our lowercase tool names. `base` and `valid`
+/// are expected to already be lowercase. Pure (no I/O) so it is unit-testable.
 fn effective_skill_tools(
     base: &[String],
+    valid: &[String],
     allowed: Option<&[String]>,
     disallowed: Option<&[String]>,
 ) -> Vec<String> {
+    let norm = |s: &str| s.trim().to_lowercase();
+    let deny: Vec<String> = disallowed.map(|d| d.iter().map(|s| norm(s)).collect()).unwrap_or_default();
+
     let mut tools: Vec<String> = match allowed {
-        Some(a) if !a.is_empty() => base
-            .iter()
-            .filter(|t| a.iter().any(|x| x == *t))
-            .cloned()
-            .collect(),
+        Some(a) if !a.is_empty() => {
+            let mut out: Vec<String> = Vec::new();
+            for name in a.iter().map(|s| norm(s)) {
+                if valid.contains(&name) && !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+            out
+        }
         _ => base.to_vec(),
     };
-    if let Some(deny) = disallowed {
-        tools.retain(|t| !deny.iter().any(|d| d == t));
-    }
+    tools.retain(|t| !deny.contains(t));
     tools
 }
 
@@ -2101,19 +2118,34 @@ mod tests {
     #[test]
     fn effective_skill_tools_defaults_to_base_when_no_allowlist() {
         let base = sv(&["read", "glob", "grep"]);
-        // None allowed → base unchanged
-        assert_eq!(effective_skill_tools(&base, None, None), base);
-        // Empty allowed → treated as "no restriction" → base unchanged
-        assert_eq!(effective_skill_tools(&base, Some(&[]), None), base);
+        let valid = sv(&["read", "glob", "grep", "bash", "write"]);
+        // None allowed → read-only base unchanged
+        assert_eq!(effective_skill_tools(&base, &valid, None, None), base);
+        // Empty allowed → treated as "no allowlist" → base unchanged
+        assert_eq!(effective_skill_tools(&base, &valid, Some(&[]), None), base);
     }
 
     #[test]
-    fn effective_skill_tools_intersects_allowlist() {
-        let base = sv(&["read", "glob", "grep", "bash"]);
-        let allowed = sv(&["read", "bash", "write"]); // "write" not in base
-        // Intersection of base ∩ allowed, base order preserved.
+    fn effective_skill_tools_allowlist_defines_scope_validated() {
+        let base = sv(&["read", "glob", "grep"]);
+        let valid = sv(&["read", "glob", "grep", "bash", "write"]);
+        // The allowlist defines the scope (can exceed the read-only base);
+        // names not in `valid` (e.g. "frobnicate") are dropped.
+        let allowed = sv(&["read", "bash", "write", "frobnicate"]);
         assert_eq!(
-            effective_skill_tools(&base, Some(&allowed), None),
+            effective_skill_tools(&base, &valid, Some(&allowed), None),
+            sv(&["read", "bash", "write"])
+        );
+    }
+
+    #[test]
+    fn effective_skill_tools_is_case_insensitive() {
+        let base = sv(&["read", "glob", "grep"]);
+        let valid = sv(&["read", "glob", "grep", "bash", "write"]);
+        // Claude-style capitalized frontmatter must match our lowercase names.
+        let allowed = sv(&["Read", "BASH"]);
+        assert_eq!(
+            effective_skill_tools(&base, &valid, Some(&allowed), None),
             sv(&["read", "bash"])
         );
     }
@@ -2121,15 +2153,18 @@ mod tests {
     #[test]
     fn effective_skill_tools_subtracts_disallowed() {
         let base = sv(&["read", "glob", "grep", "bash"]);
+        let valid = sv(&["read", "glob", "grep", "bash", "write"]);
         let disallowed = sv(&["bash"]);
+        // base path: deny removes from the read-only base.
         assert_eq!(
-            effective_skill_tools(&base, None, Some(&disallowed)),
+            effective_skill_tools(&base, &valid, None, Some(&disallowed)),
             sv(&["read", "glob", "grep"])
         );
-        // Disallowed wins even over an explicit allow.
+        // Disallowed wins even over an explicit allow, case-insensitively.
         let allowed = sv(&["read", "bash"]);
+        let deny_caps = sv(&["Bash"]);
         assert_eq!(
-            effective_skill_tools(&base, Some(&allowed), Some(&disallowed)),
+            effective_skill_tools(&base, &valid, Some(&allowed), Some(&deny_caps)),
             sv(&["read"])
         );
     }
