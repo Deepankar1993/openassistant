@@ -26,10 +26,10 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use serenity::all::{
-    ChannelId, Client, CommandDataOptionValue, CommandOptionType, Context as SerenityContext,
-    CreateCommand, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, CreateThread, EventHandler, GatewayIntents, Http,
-    Interaction, Message as DiscordMessage, ReactionType, Ready,
+    Channel, ChannelId, ChannelType, Client, CommandDataOptionValue, CommandOptionType,
+    Context as SerenityContext, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateThread, EventHandler,
+    GatewayIntents, Http, Interaction, Message as DiscordMessage, ReactionType, Ready,
 };
 use serenity::async_trait;
 
@@ -125,6 +125,32 @@ impl Handler {
             let _ = store.save_session(conv_id, &session);
         }
         reply
+    }
+
+    /// Fire Discord's "Bot is typing…" indicator on a channel. It lasts ~10s or
+    /// until a message is posted, which covers most agent turns. Best-effort —
+    /// errors (missing perms, transient) are ignored. Complements the 👀 reaction.
+    async fn typing(&self, ctx: &SerenityContext, channel: ChannelId) {
+        let _ = channel.broadcast_typing(&ctx.http).await;
+    }
+
+    /// Look up whether `channel_id` is itself a thread (forum post, news thread,
+    /// or any thread the bot didn't create). One HTTP `to_channel` call; gate it
+    /// to the channel-level guild path so it runs at most once per thread, then
+    /// cache the result in `self.threads` (+ persist) so subsequent messages skip
+    /// the lookup. Returns true if the channel is a thread and was registered.
+    async fn discover_thread(&self, ctx: &SerenityContext, channel: ChannelId) -> bool {
+        let is_thread = match channel.to_channel(&ctx.http).await {
+            Ok(Channel::Guild(gc)) => is_thread_kind(gc.kind),
+            _ => false,
+        };
+        if is_thread {
+            let tid = channel.get();
+            self.threads.lock().await.insert(tid);
+            let store = self.store.lock().await;
+            let _ = store.mark_thread(tid, "discovered");
+        }
+        is_thread
     }
 
     /// Add 👀 to signal "I'm working on it" (Hermes-style). Best-effort.
@@ -252,17 +278,26 @@ impl EventHandler for Handler {
         let channel_id = msg.channel_id.get();
         let user_id = msg.author.id.get();
         let is_dm = msg.guild_id.is_none();
-        let in_thread = self.threads.lock().await.contains(&channel_id);
+        let mut in_thread = self.threads.lock().await.contains(&channel_id);
         let is_free = !is_dm && !in_thread && self.free_response.contains(&channel_id);
 
         // @mention / home lookups only matter on the channel-level guild path —
         // skip the extra HTTP call for DMs, threads, and free-response channels.
+        // On that same path we also resolve the channel once to detect a thread
+        // we aren't tracking yet (a forum post, or a reply in a thread the bot
+        // didn't create): such a channel can't host a sub-thread, so we treat it
+        // as a direct conversation and register it so the lookup never repeats.
         let (mentioned, in_home) = if is_dm || in_thread || is_free {
             (false, false)
         } else {
-            let mentioned = msg.mentions_me(&ctx.http).await.unwrap_or(false);
-            let in_home = *self.home_channel.lock().await == Some(channel_id);
-            (mentioned, in_home)
+            if self.discover_thread(&ctx, msg.channel_id).await {
+                in_thread = true;
+                (false, false)
+            } else {
+                let mentioned = msg.mentions_me(&ctx.http).await.unwrap_or(false);
+                let in_home = *self.home_channel.lock().await == Some(channel_id);
+                (mentioned, in_home)
+            }
         };
 
         match decide_action(is_dm, in_thread, is_free, mentioned, in_home, self.require_mention) {
@@ -276,6 +311,7 @@ impl EventHandler for Handler {
                     channel_id
                 };
                 self.react_start(&ctx, &msg).await;
+                self.typing(&ctx, msg.channel_id).await;
                 let reply = self.respond(conv, &content).await;
                 self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
                 self.send_chunked(&ctx, msg.channel_id, &reply).await;
@@ -295,12 +331,14 @@ impl EventHandler for Handler {
                             let store = self.store.lock().await;
                             let _ = store.mark_thread(tid, &title);
                         }
+                        self.typing(&ctx, thread.id).await;
                         let reply = self.respond(tid, &content).await;
                         self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
                         self.send_chunked(&ctx, thread.id, &reply).await;
                     }
                     Err(e) => {
                         warn!("Could not create thread ({}); replying in channel.", e);
+                        self.typing(&ctx, msg.channel_id).await;
                         let reply = self.respond(channel_id, &content).await;
                         self.react_finish(&ctx, &msg, !is_error_reply(&reply)).await;
                         self.send_chunked(&ctx, msg.channel_id, &reply).await;
@@ -348,6 +386,7 @@ impl EventHandler for Handler {
                 {
                     return;
                 }
+                self.typing(&ctx, cmd.channel_id).await;
                 let reply = self.respond(channel_id, &message).await;
                 for chunk in chunk_message(&reply) {
                     let _ = cmd
@@ -641,6 +680,18 @@ fn decide_action(
     Action::Ignore
 }
 
+/// Whether a `ChannelType` is some kind of thread. Forum posts are
+/// `PublicThread`/`PrivateThread` whose parent is a `Forum`; replies in any
+/// thread (incl. `NewsThread`) report a thread kind too. A thread can't host a
+/// sub-thread, so when an inbound message lands in one we converse inline rather
+/// than calling `create_thread_from_message`. Pure, so it's unit-testable.
+fn is_thread_kind(kind: ChannelType) -> bool {
+    matches!(
+        kind,
+        ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+    )
+}
+
 /// Whether a reply string is one of the agent/bridge error messages (which are
 /// prefixed with the ⚠️ warning sign) — used to pick the ✅/❌ status reaction.
 fn is_error_reply(reply: &str) -> bool {
@@ -743,6 +794,19 @@ mod tests {
 
         // require_mention = false → answer everything (via a thread).
         assert_eq!(decide_action(false, false, false, false, false, false), Action::Thread);
+    }
+
+    #[test]
+    fn is_thread_kind_detects_threads_only() {
+        // Thread kinds (forum posts arrive as Public/PrivateThread) → inline reply.
+        assert!(is_thread_kind(ChannelType::PublicThread));
+        assert!(is_thread_kind(ChannelType::PrivateThread));
+        assert!(is_thread_kind(ChannelType::NewsThread));
+        // Normal channels keep the mention/home → spawn-thread behavior.
+        assert!(!is_thread_kind(ChannelType::Text));
+        assert!(!is_thread_kind(ChannelType::News));
+        assert!(!is_thread_kind(ChannelType::Forum));
+        assert!(!is_thread_kind(ChannelType::Voice));
     }
 
     #[test]
