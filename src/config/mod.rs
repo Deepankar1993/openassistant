@@ -245,6 +245,10 @@ pub struct GatewayConfig {
     /// (Hermes default) instead of one shared room-wide conversation.
     #[serde(default = "default_true")]
     pub discord_group_sessions_per_user: bool,
+    /// When true (default), text-like message attachments are downloaded, their
+    /// text extracted, and folded into the conversation content (Hermes parity).
+    #[serde(default = "default_true")]
+    pub discord_attachments_enabled: bool,
     pub telegram_token: String,
     pub slack_token: String,
     pub slack_signing_secret: String,
@@ -267,6 +271,7 @@ impl Default for GatewayConfig {
             discord_require_mention: true,
             discord_free_response_channels: Vec::new(),
             discord_group_sessions_per_user: true,
+            discord_attachments_enabled: true,
             telegram_token: String::new(),
             slack_token: String::new(),
             slack_signing_secret: String::new(),
@@ -401,6 +406,9 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         }
         "gateway.discord_group_sessions_per_user" => {
             config.gateway.discord_group_sessions_per_user = value.parse().unwrap_or(true)
+        }
+        "gateway.discord_attachments_enabled" => {
+            config.gateway.discord_attachments_enabled = value.parse().unwrap_or(true)
         }
         "gateway.webhook_host" => config.gateway.webhook_host = value.to_string(),
         "gateway.webhook_port" => {
@@ -649,6 +657,7 @@ vision:
         assert!(cfg.gateway.discord_reactions);
         assert!(cfg.gateway.discord_require_mention);
         assert!(cfg.gateway.discord_group_sessions_per_user);
+        assert!(cfg.gateway.discord_attachments_enabled);
         assert!(cfg.gateway.discord_free_response_channels.is_empty());
 
         let mut cfg2 = Config::default();
@@ -656,11 +665,13 @@ vision:
         cfg2.gateway.discord_require_mention = false;
         cfg2.gateway.discord_free_response_channels = vec!["123".into(), "456".into()];
         cfg2.gateway.discord_group_sessions_per_user = false;
+        cfg2.gateway.discord_attachments_enabled = false;
         let yaml = serde_yaml::to_string(&cfg2).expect("serialize");
         let back: Config = serde_yaml::from_str(&yaml).expect("deserialize");
         assert!(!back.gateway.discord_reactions);
         assert!(!back.gateway.discord_require_mention);
         assert!(!back.gateway.discord_group_sessions_per_user);
+        assert!(!back.gateway.discord_attachments_enabled);
         assert_eq!(back.gateway.discord_free_response_channels, vec!["123", "456"]);
 
         // Legacy gateway block (no new keys) loads with the toggles defaulting ON.
@@ -669,6 +680,7 @@ vision:
         assert!(cfg3.gateway.discord_reactions);
         assert!(cfg3.gateway.discord_require_mention);
         assert!(cfg3.gateway.discord_group_sessions_per_user);
+        assert!(cfg3.gateway.discord_attachments_enabled);
         assert!(cfg3.gateway.discord_free_response_channels.is_empty());
     }
 

@@ -1,4 +1,5 @@
 // src/gateway/mod.rs
+pub mod attachments;
 pub mod discord;
 pub mod discord_store;
 pub mod proactive;
