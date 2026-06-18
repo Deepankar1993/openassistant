@@ -265,8 +265,26 @@ impl Agent {
             Self::fire_hook(&hooks, super::hooks::HookEvent::UserPromptSubmit, hc).await;
         }
 
+        // Hydrate the auto-learned user model from disk once per turn, before
+        // observing — so a fresh FullContext picks up prior learning. Only load
+        // when the in-memory model is still empty, to avoid clobbering a model
+        // that's already been populated this process.
+        if !self.workspace_dir.is_empty() && ctx.user.is_empty() {
+            let loaded = super::persona::UserModel::load_or_default(&self.workspace_dir);
+            if !loaded.is_empty() {
+                ctx.user = loaded;
+            }
+        }
+
         // Learn from conversation
         ctx.observe(message);
+
+        // Persist the freshly-updated user model (best-effort: never fail the turn).
+        if !self.workspace_dir.is_empty() {
+            if let Err(e) = ctx.user.save(&self.workspace_dir) {
+                tracing::warn!("failed to persist user model: {e}");
+            }
+        }
 
         // Load the durable "what I know about you" facts off the async thread
         // (a sync SQLite open per turn would otherwise block the executor).
