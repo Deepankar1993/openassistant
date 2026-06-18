@@ -81,5 +81,9 @@ tempfile = "3"
 # stack alongside reqwest's; minimal feature set for receiving + replying.
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "http", "builder", "rustls_backend"] }
 
+# Pure-Rust PDF text extraction for Discord attachment ingest. No system libs,
+# builds on Windows. API: pdf_extract::extract_text_from_mem(&[u8]) -> Result<String>.
+pdf-extract = "0.10"
+
 [dev-dependencies]
 tokio-test = "0.4"
