@@ -15,6 +15,14 @@ use tracing::warn;
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024;
 /// Maximum number of attachments read from a single message (extras ignored).
 pub const MAX_ATTACHMENTS: usize = 4;
+/// Raw-download size ceiling. `Attachment::download()` buffers the whole file
+/// into memory, so we reject anything larger than this via `att.size` *before*
+/// downloading (Discord allows multi-MB uploads). Generous vs. the 64 KiB text
+/// cap to allow whitespace/markup overhead.
+pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024;
+/// Per-attachment download timeout, so a slow CDN can't stall the turn (and the
+/// 👀→✅/❌ reaction) indefinitely.
+const DOWNLOAD_TIMEOUT_SECS: u64 = 15;
 
 /// Filename extensions accepted as text when the MIME type is missing or not
 /// obviously text.
@@ -83,15 +91,32 @@ pub async fn extract_attachments(msg: &serenity::all::Message) -> String {
         if !is_text_attachment(&att.filename, att.content_type.as_deref()) {
             continue;
         }
-        match att.download().await {
-            Ok(bytes) => {
+        // Reject oversized files by their declared size before buffering them
+        // into memory (download() reads the whole body).
+        if u64::from(att.size) > MAX_DOWNLOAD_BYTES {
+            warn!(
+                "Discord attachment {} ({} bytes) exceeds the {} byte cap; skipping",
+                att.filename, att.size, MAX_DOWNLOAD_BYTES
+            );
+            continue;
+        }
+        let dl = tokio::time::timeout(
+            std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS),
+            att.download(),
+        )
+        .await;
+        match dl {
+            Ok(Ok(bytes)) => {
                 let text = String::from_utf8_lossy(&bytes);
                 let capped = cap_text(&text, MAX_ATTACHMENT_BYTES);
                 out.push_str(&format_attachment(&att.filename, &capped));
                 read += 1;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("Discord attachment download failed ({}): {}", att.filename, e);
+            }
+            Err(_) => {
+                warn!("Discord attachment download timed out ({})", att.filename);
             }
         }
     }

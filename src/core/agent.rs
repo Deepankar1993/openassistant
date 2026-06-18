@@ -279,11 +279,18 @@ impl Agent {
         // Learn from conversation
         ctx.observe(message);
 
-        // Persist the freshly-updated user model (best-effort: never fail the turn).
+        // Persist the freshly-updated user model off the async thread (sync fs
+        // write), best-effort: never fail the turn.
         if !self.workspace_dir.is_empty() {
-            if let Err(e) = ctx.user.save(&self.workspace_dir) {
-                tracing::warn!("failed to persist user model: {e}");
-            }
+            let model = ctx.user.clone();
+            let dir = self.workspace_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = model.save(&dir) {
+                    tracing::warn!("failed to persist user model: {e}");
+                }
+            })
+            .await
+            .ok();
         }
 
         // Load the durable "what I know about you" facts off the async thread

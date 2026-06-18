@@ -160,10 +160,14 @@ impl UserModel {
     pub fn is_empty(&self) -> bool {
         self.name == "User"
             && self.what_to_call_them == "friend"
+            && self.timezone == "UTC"
+            && self.language == "English"
             && self.technical_level == "intermediate"
+            && self.communication_style == "balanced"
             && self.interests.is_empty()
             && self.projects.is_empty()
             && self.notes.is_empty()
+            && self.preferences.as_object().map_or(true, |o| o.is_empty())
     }
 }
 
