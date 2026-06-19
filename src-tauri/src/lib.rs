@@ -118,6 +118,12 @@ pub fn run() {
             commands::gateway::gateway_start,
             commands::gateway::gateway_stop,
             commands::gateway::gateway_status,
+            // schedules (read-only listings of cron / standing-orders / watchers / brief)
+            commands::schedules::list_cron_jobs,
+            commands::schedules::list_standing_orders,
+            commands::schedules::list_watchers,
+            commands::schedules::get_brief_settings,
+            commands::schedules::get_schedules_overview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
