@@ -129,6 +129,71 @@ pub async fn get_config() -> Result<ConfigDto, String> {
     })
 }
 
+/// A named API provider (from `[[providers]]`), secret masked.
+#[derive(Debug, Serialize)]
+pub struct ProviderEntryDto {
+    pub name: String,
+    pub api_base: String,
+    pub api_key_masked: String,
+    pub api_key_set: bool,
+}
+
+/// One configured per-modality route (from `[routing]`).
+#[derive(Debug, Serialize)]
+pub struct ModalityRouteDto {
+    pub modality: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Provider/routing view: the active default provider plus any named providers
+/// and per-modality routes used for multi-model routing. Read-only.
+#[derive(Debug, Serialize)]
+pub struct ProvidersDto {
+    pub active_provider: String,
+    pub active_model: String,
+    pub active_api_base: String,
+    pub providers: Vec<ProviderEntryDto>,
+    pub routing: Vec<ModalityRouteDto>,
+}
+
+/// Read the configured providers + routing for the Providers view. Secrets masked.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_providers() -> Result<ProvidersDto, String> {
+    let cfg = config::load().await.map_err(|e| e.to_string())?;
+    let providers = cfg
+        .providers
+        .iter()
+        .map(|p| ProviderEntryDto {
+            name: p.name.clone(),
+            api_base: p.api_base.clone(),
+            api_key_masked: mask_key(&p.api_key),
+            api_key_set: !p.api_key.trim().is_empty(),
+        })
+        .collect();
+    let routing = [
+        ("text", &cfg.routing.text),
+        ("vision", &cfg.routing.vision),
+        ("image_gen", &cfg.routing.image_gen),
+        ("video", &cfg.routing.video),
+    ]
+    .into_iter()
+    .filter(|(_, r)| !r.provider.trim().is_empty() || !r.model.trim().is_empty())
+    .map(|(m, r)| ModalityRouteDto {
+        modality: m.to_string(),
+        provider: r.provider.clone(),
+        model: r.model.clone(),
+    })
+    .collect();
+    Ok(ProvidersDto {
+        active_provider: cfg.model.provider,
+        active_model: cfg.model.model,
+        active_api_base: cfg.model.api_base,
+        providers,
+        routing,
+    })
+}
+
 /// Persist the Model section only. Kept as a stable, minimal command (used by the
 /// existing E2E tests and the Settings Model section). Bypasses `config::set()`.
 #[tauri::command(rename_all = "snake_case")]

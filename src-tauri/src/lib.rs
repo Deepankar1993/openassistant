@@ -84,6 +84,7 @@ pub fn run() {
             commands::chat::delete_conversation,
             // settings
             commands::settings::get_config,
+            commands::settings::get_providers,
             commands::settings::save_config,
             commands::settings::save_full_config,
             commands::settings::set_tools_enabled,
