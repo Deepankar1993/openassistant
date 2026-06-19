@@ -991,3 +991,59 @@ code, pre, kbd, samp { font-family: var(--font-mono); font-size: 13px; }
 /* ── Placeholder / empty ─────────────────────────── */
 .placeholder { align-items: center; justify-content: center; }
 .empty { color: var(--text-muted); font-size: 15px; }
+
+/* ── Hermes-parity views (Sessions/Providers/Tools/Schedules) ── */
+/* Sessions */
+.sessions-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.sessions-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary);
+}
+.sessions-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sessions-item-title {
+  font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sessions-item-meta { font-size: 12px; color: var(--text-muted); }
+.sessions-item-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.sessions-empty { color: var(--text-muted); font-size: 14px; padding: 8px 2px; }
+
+/* Providers */
+.providers-list { display: flex; flex-direction: column; gap: 8px; }
+.provider-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary); font-size: 13px;
+}
+.provider-name { font-weight: 600; min-width: 120px; }
+.provider-base { color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; flex: 1; min-width: 0; }
+.provider-key { font-family: var(--font-mono); font-size: 12px; }
+.provider-key.set { color: var(--success); }
+.provider-key.unset { color: var(--text-muted); }
+
+/* Tools catalogue */
+.tools-catalogue { display: flex; flex-direction: column; gap: 6px; }
+.tool-row {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary);
+}
+.tool-name { font-weight: 600; font-family: var(--font-mono); font-size: 13px; min-width: 110px; flex-shrink: 0; }
+.tool-desc { font-size: 13px; color: var(--text-secondary); }
+
+/* Schedules */
+.sched-list { display: flex; flex-direction: column; gap: 8px; }
+.sched-row {
+  padding: 11px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary);
+}
+.sched-row-head { display: flex; align-items: center; gap: 10px; }
+.sched-name { font-weight: 600; font-size: 14px; }
+.sched-meta { font-size: 12px; color: var(--text-secondary); margin-top: 4px; font-family: var(--font-mono); }
+.sched-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.sched-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+  text-transform: uppercase; letter-spacing: .02em;
+}
+.sched-badge.on { background: var(--success-light, rgba(16,185,129,.15)); color: var(--success); }
+.sched-badge.off { background: var(--bg-tertiary); color: var(--text-muted); }

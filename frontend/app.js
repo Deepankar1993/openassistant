@@ -357,6 +357,36 @@
         return null;
       }
 
+      // ── Providers (read-only) ──
+      case "get_providers":
+        return {
+          active_provider: mockState.config.provider || "openrouter",
+          active_model: mockState.config.model || "openrouter/owl-alpha",
+          active_api_base: mockState.config.api_base || "https://openrouter.ai/api/v1",
+          providers: [
+            { name: "openai", api_base: "https://api.openai.com/v1", api_key_masked: "••••••••1234", api_key_set: true },
+          ],
+          routing: [
+            { modality: "text", provider: "openai", model: "gpt-4o" },
+          ],
+        };
+
+      // ── Schedules overview (read-only) ──
+      case "get_schedules_overview":
+        return {
+          cron: [
+            { id: "cron-1", name: "Morning summary", schedule: "every 1d", prompt: "Summarize today's priorities.", enabled: true, last_run: new Date(Date.now() - 86400000).toISOString() },
+            { id: "cron-2", name: "Hourly health ping", schedule: "every 1h", prompt: "Check service health.", enabled: false, last_run: "" },
+          ],
+          standing_orders: [
+            { id: "so-1", name: "Inject project context", trigger: "Keyword: deploy", action: "InjectContext", enabled: true },
+          ],
+          watchers: [
+            { id: "w-1", url: "https://example.com/changelog", note: "Watch for releases", last_checked: new Date(Date.now() - 3600000).toISOString() },
+          ],
+          brief: { enabled: false, time: "08:00", discord: true, telegram_chat_id: "" },
+        };
+
       default:
         return null;
     }
@@ -379,7 +409,7 @@
   }
 
   // ── View routing ──────────────────────────────────
-  const views = ["chat", "settings", "memory", "status", "skills"];
+  const views = ["chat", "settings", "memory", "status", "skills", "sessions", "models", "providers", "persona", "tools", "schedules", "gateway"];
   function switchView(name) {
     if (!views.includes(name)) return;
     views.forEach((v) => $("#view-" + v).classList.toggle("hidden", v !== name));
@@ -390,6 +420,13 @@
     if (name === "memory") loadMemoryView();
     if (name === "skills") loadSkillsView();
     if (name === "status") loadStatusView();
+    if (name === "sessions") loadSessionsView();
+    if (name === "models") loadModelsView();
+    if (name === "providers") loadProvidersView();
+    if (name === "persona") loadPersonaView();
+    if (name === "tools") loadToolsView();
+    if (name === "schedules") loadSchedulesView();
+    if (name === "gateway") loadGatewayView();
   }
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-view]");
@@ -2016,6 +2053,522 @@
   // Status rerun wizard button
   document.addEventListener("click", (e) => {
     if (e.target.closest("#status-rerun-wizard-btn")) openWizard(false);
+  });
+
+  // ── Sessions view (standalone conversation list) ──
+  async function loadSessionsView() {
+    const list = $("#sessions-list");
+    if (!list) return;
+    let convs = [];
+    try {
+      const res = await backend("list_conversations", {});
+      if (Array.isArray(res)) convs = res;
+    } catch (_) { convs = []; }
+    list.innerHTML = "";
+    if (!convs.length) {
+      const empty = document.createElement("li");
+      empty.className = "sessions-empty";
+      empty.textContent = "No conversations yet. Start chatting to build your history.";
+      list.appendChild(empty);
+      return;
+    }
+    convs.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "sessions-item";
+      li.dataset.testid = "sessions-item";
+
+      const body = document.createElement("div");
+      body.className = "sessions-item-body";
+      const title = document.createElement("span");
+      title.className = "sessions-item-title";
+      title.textContent = c.title || "Untitled conversation";
+      const meta = document.createElement("span");
+      meta.className = "sessions-item-meta";
+      const count = c.message_count || 0;
+      meta.textContent = `${count} message${count === 1 ? "" : "s"} · ${relativeTime(c.updated_at)} · ${c.updated_at || ""}`;
+      body.appendChild(title);
+      body.appendChild(meta);
+
+      const actions = document.createElement("div");
+      actions.className = "sessions-item-actions";
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "btn small primary";
+      openBtn.dataset.testid = "sessions-open";
+      openBtn.textContent = "Open";
+      openBtn.addEventListener("click", async () => {
+        await selectConversation(c.id);
+        switchView("chat");
+      });
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "btn small";
+      delBtn.dataset.testid = "sessions-delete";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", async () => {
+        await deleteConversation(c.id);
+        loadSessionsView();
+      });
+      actions.appendChild(openBtn);
+      actions.appendChild(delBtn);
+
+      li.appendChild(body);
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+  }
+  const sessionsNewBtn = $("#sessions-new-btn");
+  if (sessionsNewBtn) sessionsNewBtn.addEventListener("click", async () => {
+    try { await backend("new_conversation", {}); } catch (_) {}
+    resetToEmptyChat();
+    await refreshConversations();
+    refreshStatus();
+    switchView("chat");
+    if (!chatInput.disabled) chatInput.focus();
+  });
+
+  // ── Models view (active model editor) ─────────────
+  async function loadModelsView() {
+    try {
+      const c = await backend("get_config", {});
+      if (!c) return;
+      $("#models-model").value = c.model || "";
+      $("#models-api-base").value = c.api_base || "";
+      $("#models-api-key").value = "";
+      $("#models-key-hint").textContent = c.api_key_set
+        ? `A key is set (${c.api_key_masked}). Leave blank to keep it.`
+        : "No key set. Paste one to enable chat.";
+    } catch (_) { showToast("Failed to load model settings", true); }
+  }
+  const modelsKeyToggle = $("#models-api-key-toggle");
+  if (modelsKeyToggle) modelsKeyToggle.addEventListener("click", () => {
+    const inp = $("#models-api-key");
+    const isPass = inp.type === "password";
+    inp.type = isPass ? "text" : "password";
+    modelsKeyToggle.textContent = isPass ? "Hide" : "Show";
+  });
+  const modelsTestBtn = $("#models-test-btn");
+  if (modelsTestBtn) modelsTestBtn.addEventListener("click", async () => {
+    const key = $("#models-api-key").value.trim();
+    const base = $("#models-api-base").value.trim();
+    const model = $("#models-model").value.trim();
+    const resultEl = $("#models-conn-result");
+    modelsTestBtn.disabled = true;
+    modelsTestBtn.textContent = "Testing…";
+    resultEl.className = "conn-result";
+    resultEl.classList.remove("hidden");
+    resultEl.textContent = "Testing…";
+    try {
+      const r = await backend("probe_connection", { api_key: key, api_base: base, model });
+      if (r && r.ok) {
+        resultEl.className = "conn-result ok";
+        resultEl.textContent = `Connected! Responded in ${r.latency_ms}ms.`;
+      } else if (r && r.error_type === "auth_failure") {
+        resultEl.className = "conn-result fail";
+        resultEl.textContent = "Invalid API key. Check the value and try again.";
+      } else if (r && r.error_type === "model_unavailable") {
+        resultEl.className = "conn-result warn";
+        resultEl.textContent = "Model not found. Try a different model name, or your key may not have access.";
+      } else {
+        resultEl.className = "conn-result warn";
+        resultEl.textContent = "Could not reach the endpoint. Check the URL and your network.";
+      }
+    } catch (_) {
+      resultEl.className = "conn-result fail";
+      resultEl.textContent = "Connection test failed.";
+    } finally {
+      modelsTestBtn.disabled = false;
+      modelsTestBtn.textContent = "Test connection";
+    }
+  });
+  const modelsForm = $("#models-form");
+  if (modelsForm) modelsForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = $("#models-save-status");
+    status.className = "save-status";
+    status.textContent = "Saving…";
+    const key = $("#models-api-key").value.trim();
+    try {
+      await backend("save_config", {
+        model: $("#models-model").value.trim(),
+        api_base: $("#models-api-base").value.trim(),
+        api_key: key.length ? key : null,
+      });
+      status.textContent = "Saved ✓";
+      showToast("Model settings saved");
+      await loadModelsView();
+      refreshStatus();
+    } catch (err) {
+      status.className = "save-status err";
+      status.textContent = "Save failed";
+      showToast(typeof err === "string" ? err : "Save failed", true);
+    }
+  });
+
+  // ── Providers view (read-only) ────────────────────
+  async function loadProvidersView() {
+    const activeEl = $("#providers-active");
+    const listEl = $("#providers-list");
+    const routingEl = $("#providers-routing");
+    if (!activeEl) return;
+    let data = null;
+    try { data = await backend("get_providers", {}); } catch (_) { data = null; }
+    if (!data) {
+      activeEl.innerHTML = "";
+      listEl.innerHTML = '<div class="hint">Multi-provider routing is configured in config.yaml.</div>';
+      routingEl.innerHTML = "";
+      return;
+    }
+    // Active provider
+    activeEl.innerHTML = "";
+    [["Provider", data.active_provider || "—"],
+     ["Model", data.active_model || "—"],
+     ["API base", data.active_api_base || "—"]].forEach(([k, v]) => {
+      const keyEl = document.createElement("span"); keyEl.className = "status-key"; keyEl.textContent = k;
+      const valEl = document.createElement("span"); valEl.className = "status-val"; valEl.textContent = v;
+      activeEl.appendChild(keyEl); activeEl.appendChild(valEl);
+    });
+    // Providers list
+    listEl.innerHTML = "";
+    const providers = Array.isArray(data.providers) ? data.providers : [];
+    if (!providers.length) {
+      listEl.innerHTML = '<div class="hint">No additional providers configured. Multi-provider routing is set up in config.yaml.</div>';
+    } else {
+      providers.forEach((p) => {
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        const name = document.createElement("span"); name.className = "provider-name"; name.textContent = p.name || "(unnamed)";
+        const base = document.createElement("span"); base.className = "provider-base"; base.textContent = p.api_base || "";
+        const key = document.createElement("span");
+        key.className = "provider-key " + (p.api_key_set ? "set" : "unset");
+        key.textContent = p.api_key_set ? (p.api_key_masked || "set") : "not set";
+        row.appendChild(name); row.appendChild(base); row.appendChild(key);
+        listEl.appendChild(row);
+      });
+    }
+    // Routing
+    routingEl.innerHTML = "";
+    const routing = Array.isArray(data.routing) ? data.routing : [];
+    if (!routing.length) {
+      routingEl.innerHTML = '<div class="hint">No routing overrides. All modalities use the active provider.</div>';
+    } else {
+      routing.forEach((r) => {
+        const row = document.createElement("div");
+        row.className = "provider-row";
+        const mod = document.createElement("span"); mod.className = "provider-name"; mod.textContent = r.modality || "—";
+        const prov = document.createElement("span"); prov.className = "provider-base"; prov.textContent = (r.provider || "—") + " / " + (r.model || "—");
+        row.appendChild(mod); row.appendChild(prov);
+        routingEl.appendChild(row);
+      });
+    }
+  }
+
+  // ── Persona view (editor) ─────────────────────────
+  async function loadPersonaView() {
+    try {
+      const p = await backend("get_persona", {});
+      if (!p) return;
+      $("#pv-name").value = p.name || "";
+      $("#pv-emoji").value = p.emoji || "";
+      $("#pv-tone").value = p.tone || "friendly";
+      $("#pv-language").value = p.language || "";
+      $("#pv-personality").value = p.personality || "";
+      $("#pv-principles").value = (p.principles || []).join("\n");
+      $("#pv-boundaries").value = (p.boundaries || []).join("\n");
+      $("#pv-capabilities").value = (p.capabilities || []).join("\n");
+    } catch (_) { showToast("Failed to load persona", true); }
+  }
+  const personaViewForm = $("#persona-view-form");
+  if (personaViewForm) personaViewForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = $("#pv-save-status");
+    status.className = "save-status";
+    status.textContent = "Saving…";
+    try {
+      await backend("save_persona", { dto: {
+        name: $("#pv-name").value.trim() || "openAssistant",
+        emoji: $("#pv-emoji").value.trim(),
+        tone: $("#pv-tone").value,
+        language: $("#pv-language").value.trim() || "English",
+        personality: $("#pv-personality").value.trim(),
+        principles: linesOf("#pv-principles"),
+        boundaries: linesOf("#pv-boundaries"),
+        capabilities: linesOf("#pv-capabilities"),
+      } });
+      status.textContent = "Saved ✓";
+      showToast("Persona saved");
+      // Keep the settings-section persona editor and the chat label in sync.
+      const newName = $("#pv-name").value.trim() || "openAssistant";
+      personaName = newName; updatePersonaLabels();
+    } catch (err) {
+      status.className = "save-status err";
+      status.textContent = "Save failed";
+      showToast(typeof err === "string" ? err : "Save failed", true);
+    }
+  });
+
+  // ── Tools view (execution toggle + catalogue) ─────
+  const TOOLS_CATALOGUE = [
+    ["read", "Read a file from disk."],
+    ["glob", "Find files by glob pattern."],
+    ["grep", "Search file contents with a regex."],
+    ["bash", "Run a shell command (bash)."],
+    ["shell", "Run a platform shell command."],
+    ["file", "Write or edit a file."],
+    ["file_search", "Combined glob/grep file search."],
+    ["browser", "Fetch and read web pages."],
+    ["vision", "Analyze images (via the Gemini CLI)."],
+    ["remember", "Store, list, or forget durable facts about you."],
+    ["web_search", "Search the web for current information."],
+    ["task", "Spawn an in-process sub-agent for a scoped task."],
+    ["watch", "Watch a URL and notify on changes."],
+  ];
+  async function loadToolsView() {
+    try {
+      const c = await backend("get_config", {});
+      const toggle = $("#tv-tools-toggle");
+      if (toggle && c) toggle.checked = !!c.tools_enabled;
+    } catch (_) {}
+    const cat = $("#tools-catalogue");
+    if (cat && !cat.childElementCount) {
+      TOOLS_CATALOGUE.forEach(([name, desc]) => {
+        const row = document.createElement("div");
+        row.className = "tool-row";
+        const nameEl = document.createElement("span"); nameEl.className = "tool-name"; nameEl.textContent = name;
+        const descEl = document.createElement("span"); descEl.className = "tool-desc"; descEl.textContent = desc;
+        row.appendChild(nameEl); row.appendChild(descEl);
+        cat.appendChild(row);
+      });
+    }
+  }
+  const toolsViewForm = $("#tools-view-form");
+  if (toolsViewForm) toolsViewForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const status = $("#tv-save-status");
+    status.className = "save-status";
+    status.textContent = "Saving…";
+    const enabled = $("#tv-tools-toggle").checked;
+    try {
+      await backend("set_tools_enabled", { enabled });
+      status.textContent = "Saved ✓";
+      showToast("Tools setting saved");
+      // Keep the Settings → Tools toggle in sync if it's present.
+      const settingsToggle = $("#cfg-tools");
+      if (settingsToggle) settingsToggle.checked = enabled;
+      refreshStatus();
+    } catch (err) {
+      status.className = "save-status err";
+      status.textContent = "Save failed";
+      showToast(typeof err === "string" ? err : "Save failed", true);
+    }
+  });
+
+  // ── Schedules view (read-only) ────────────────────
+  function schedBadge(enabled) {
+    const b = document.createElement("span");
+    b.className = "sched-badge " + (enabled ? "on" : "off");
+    b.textContent = enabled ? "enabled" : "disabled";
+    return b;
+  }
+  function schedEmpty(container, text) {
+    container.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "hint";
+    d.textContent = text;
+    container.appendChild(d);
+  }
+  async function loadSchedulesView() {
+    const cronEl = $("#schedules-cron");
+    const ordersEl = $("#schedules-orders");
+    const watchersEl = $("#schedules-watchers");
+    const briefEl = $("#schedules-brief");
+    if (!cronEl) return;
+    let data = null;
+    try { data = await backend("get_schedules_overview", {}); } catch (_) { data = null; }
+    if (!data) {
+      schedEmpty(cronEl, "No cron jobs. Add one with `openassistant cron --action add`.");
+      schedEmpty(ordersEl, "No standing orders.");
+      schedEmpty(watchersEl, "No watchers.");
+      schedEmpty(briefEl, "Daily brief not configured.");
+      return;
+    }
+    // Cron
+    const cron = Array.isArray(data.cron) ? data.cron : [];
+    if (!cron.length) {
+      schedEmpty(cronEl, "No cron jobs. Add one with `openassistant cron --action add`.");
+    } else {
+      cronEl.innerHTML = "";
+      cron.forEach((j) => {
+        const row = document.createElement("div");
+        row.className = "sched-row";
+        const head = document.createElement("div");
+        head.className = "sched-row-head";
+        const name = document.createElement("span"); name.className = "sched-name"; name.textContent = j.name || j.id || "(unnamed)";
+        head.appendChild(name); head.appendChild(schedBadge(j.enabled));
+        const meta = document.createElement("div");
+        meta.className = "sched-meta";
+        meta.textContent = `${j.schedule || "—"}${j.last_run ? " · last run " + j.last_run : ""}`;
+        const prompt = document.createElement("div");
+        prompt.className = "sched-sub";
+        prompt.textContent = j.prompt || "";
+        row.appendChild(head); row.appendChild(meta);
+        if (j.prompt) row.appendChild(prompt);
+        cronEl.appendChild(row);
+      });
+    }
+    // Standing orders
+    const orders = Array.isArray(data.standing_orders) ? data.standing_orders : [];
+    if (!orders.length) {
+      schedEmpty(ordersEl, "No standing orders.");
+    } else {
+      ordersEl.innerHTML = "";
+      orders.forEach((o) => {
+        const row = document.createElement("div");
+        row.className = "sched-row";
+        const head = document.createElement("div");
+        head.className = "sched-row-head";
+        const name = document.createElement("span"); name.className = "sched-name"; name.textContent = o.name || o.id || "(unnamed)";
+        head.appendChild(name); head.appendChild(schedBadge(o.enabled));
+        const meta = document.createElement("div");
+        meta.className = "sched-meta";
+        meta.textContent = `trigger: ${o.trigger || "—"} · action: ${o.action || "—"}`;
+        row.appendChild(head); row.appendChild(meta);
+        ordersEl.appendChild(row);
+      });
+    }
+    // Watchers
+    const watchers = Array.isArray(data.watchers) ? data.watchers : [];
+    if (!watchers.length) {
+      schedEmpty(watchersEl, "No watchers. Ask the assistant to watch a URL for you.");
+    } else {
+      watchersEl.innerHTML = "";
+      watchers.forEach((w) => {
+        const row = document.createElement("div");
+        row.className = "sched-row";
+        const name = document.createElement("div"); name.className = "sched-name"; name.textContent = w.url || w.id || "(watcher)";
+        const meta = document.createElement("div");
+        meta.className = "sched-meta";
+        meta.textContent = `${w.note || ""}${w.last_checked ? " · last checked " + w.last_checked : ""}`;
+        row.appendChild(name); row.appendChild(meta);
+        watchersEl.appendChild(row);
+      });
+    }
+    // Brief
+    const brief = data.brief || null;
+    if (!brief) {
+      schedEmpty(briefEl, "Daily brief not configured.");
+    } else {
+      briefEl.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "sched-row-head";
+      const name = document.createElement("span"); name.className = "sched-name"; name.textContent = "Daily brief at " + (brief.time || "—");
+      head.appendChild(name); head.appendChild(schedBadge(brief.enabled));
+      const meta = document.createElement("div");
+      meta.className = "sched-meta";
+      const dests = [];
+      if (brief.discord) dests.push("Discord");
+      if (brief.telegram_chat_id) dests.push("Telegram (" + brief.telegram_chat_id + ")");
+      meta.textContent = dests.length ? "Delivers to: " + dests.join(", ") : "No delivery destinations set.";
+      briefEl.appendChild(head); briefEl.appendChild(meta);
+    }
+  }
+
+  // ── Gateway view (channel status + control) ───────
+  async function loadGatewayView() {
+    // Channels summary
+    const chEl = $("#gw-view-channels");
+    if (chEl) {
+      try {
+        const c = await backend("get_config", {});
+        chEl.innerHTML = "";
+        const channelRows = [
+          ["Discord", c.discord_token_set ? "configured" : "not configured"],
+          ["Telegram", c.telegram_token_set ? "configured" : "not configured"],
+          ["Slack", c.slack_token_set ? "configured" : "not configured"],
+          ["WebChat", `${c.webhook_host || "0.0.0.0"}:${(c.webhook_port !== undefined && c.webhook_port !== 0) ? c.webhook_port : 3000}`],
+          ["DM policy", c.dm_policy || "pairing"],
+          ["Allowed users", (Array.isArray(c.discord_allowed_users) && c.discord_allowed_users.length) ? c.discord_allowed_users.join(", ") : "—"],
+        ];
+        channelRows.forEach(([k, v]) => {
+          const keyEl = document.createElement("span"); keyEl.className = "status-key"; keyEl.textContent = k;
+          const valEl = document.createElement("span"); valEl.className = "status-val"; valEl.textContent = v;
+          chEl.appendChild(keyEl); chEl.appendChild(valEl);
+        });
+      } catch (_) {}
+    }
+    await loadGatewayViewReadiness();
+  }
+  async function loadGatewayViewReadiness() {
+    const container = $("#gw-view-readiness");
+    if (!container) return;
+    try {
+      const rows = await backend("gateway_readiness", {});
+      container.innerHTML = "";
+      (rows || []).forEach((r) => {
+        const cls = r.ok ? "ok" : r.required ? "fail" : "warn";
+        const row = document.createElement("div");
+        row.className = "doctor-row " + cls;
+        const iconEl = document.createElement("span");
+        iconEl.className = "doctor-icon";
+        iconEl.innerHTML = window.OAIcons
+          ? (r.ok ? OAIcons.check : r.required ? OAIcons.cross : OAIcons.warn)
+          : "";
+        const nameEl = document.createElement("span");
+        nameEl.className = "doctor-name";
+        nameEl.textContent = r.name;
+        const msgEl = document.createElement("span");
+        msgEl.className = "doctor-msg";
+        msgEl.textContent = r.detail;
+        row.appendChild(iconEl); row.appendChild(nameEl); row.appendChild(msgEl);
+        container.appendChild(row);
+      });
+    } catch (_) {
+      container.innerHTML = '<div class="hint" style="color:var(--danger)">Could not load readiness.</div>';
+    }
+    refreshGatewayViewRunStatus();
+  }
+  async function refreshGatewayViewRunStatus() {
+    const el = $("#gw-view-run-status");
+    const startBtn = $("#gw-view-start");
+    const stopBtn = $("#gw-view-stop");
+    if (!el) return;
+    try {
+      const s = await backend("gateway_status", {});
+      if (s && s.running) {
+        el.textContent = "● Running" + (s.address ? " · " + s.address : "");
+        el.style.color = "var(--success, #10b981)";
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = false;
+      } else {
+        el.textContent = "○ Stopped";
+        el.style.color = "var(--text-muted)";
+        if (startBtn) startBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = true;
+      }
+    } catch (_) { el.textContent = "—"; }
+  }
+  const gwViewCheck = $("#gw-view-check");
+  if (gwViewCheck) gwViewCheck.addEventListener("click", loadGatewayViewReadiness);
+  const gwViewRefresh = $("#gw-view-refresh");
+  if (gwViewRefresh) gwViewRefresh.addEventListener("click", loadGatewayView);
+  const gwViewStart = $("#gw-view-start");
+  if (gwViewStart) gwViewStart.addEventListener("click", async () => {
+    gwViewStart.disabled = true;
+    const el = $("#gw-view-run-status");
+    if (el) el.textContent = "Starting…";
+    try {
+      const url = await backend("gateway_start", {});
+      showToast("Gateway started" + (url ? " on " + url : ""));
+    } catch (err) {
+      showToast(typeof err === "string" ? err : "Failed to start gateway", true);
+    }
+    refreshGatewayViewRunStatus();
+  });
+  const gwViewStop = $("#gw-view-stop");
+  if (gwViewStop) gwViewStop.addEventListener("click", async () => {
+    try { await backend("gateway_stop", {}); showToast("Gateway stopped"); }
+    catch (_) { showToast("Failed to stop gateway", true); }
+    refreshGatewayViewRunStatus();
   });
 
   // ── Onboarding Wizard ─────────────────────────────
