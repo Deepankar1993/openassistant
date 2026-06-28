@@ -235,6 +235,27 @@ impl SkillEngine {
         &self.skills
     }
 
+    /// One-line `(name, description)` summaries of every loaded skill, in load
+    /// order. Used to advertise available skills to the model in the system
+    /// prompt so it knows which it can invoke via `self_manage`'s `run` action.
+    /// The description is whitespace-collapsed to a single line and length-capped
+    /// so a verbose frontmatter description can't bloat the prompt.
+    pub fn list_summaries(&self) -> Vec<(String, String)> {
+        self.skills
+            .iter()
+            .map(|s| {
+                let one_line = s.description.split_whitespace().collect::<Vec<_>>().join(" ");
+                let desc = if one_line.chars().count() > 160 {
+                    let head: String = one_line.chars().take(157).collect();
+                    format!("{head}...")
+                } else {
+                    one_line
+                };
+                (s.name.clone(), desc)
+            })
+            .collect()
+    }
+
     pub fn list_active(&self) -> Option<&Skill> {
         self.active_skill.as_ref().and_then(|name| self.get(name))
     }
@@ -358,5 +379,37 @@ disallowed-tools: [Write, Bash]
         assert!(!engine.is_tool_allowed("Bash"));
         // Read should still be allowed
         assert!(engine.is_tool_allowed("Read"));
+    }
+
+    #[test]
+    fn test_list_summaries_includes_builtins_one_line() {
+        let engine = SkillEngine::load_builtin().unwrap();
+        let summaries = engine.list_summaries();
+        // built-ins: coding, research, writing
+        assert_eq!(summaries.len(), 3);
+        let names: Vec<&str> = summaries.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"coding"));
+        assert!(names.contains(&"research"));
+        assert!(names.contains(&"writing"));
+        for (name, desc) in &summaries {
+            assert!(!name.is_empty());
+            assert!(!desc.is_empty());
+            assert!(!desc.contains('\n'), "description for {name} must be one line");
+        }
+    }
+
+    #[test]
+    fn test_list_summaries_collapses_and_caps() {
+        let mut engine = SkillEngine::new();
+        let verbose = format!("first line\nsecond line {}", "x".repeat(300));
+        engine.skills.push(Skill {
+            name: "verbose".into(),
+            description: verbose,
+            ..Skill::default()
+        });
+        let (_, desc) = &engine.list_summaries()[0];
+        assert!(!desc.contains('\n')); // multi-line collapsed
+        assert!(desc.chars().count() <= 160); // 157 + "..." cap
+        assert!(desc.ends_with("..."));
     }
 }
