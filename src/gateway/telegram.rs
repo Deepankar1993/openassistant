@@ -66,6 +66,18 @@ pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::
     let mut sessions: HashMap<i64, Convo> = HashMap::new();
     let mut offset: i64 = 0;
 
+    // Access control (mirrors Discord): only allow-listed users, or — when the
+    // list is empty — everyone iff dm_policy == "open". Cloned once; config is
+    // not mutated in the loop.
+    let allowed_users = config.gateway.telegram_allowed_users.clone();
+    let dm_policy = config.gateway.dm_policy.clone();
+    if allowed_users.is_empty() && dm_policy != "open" {
+        warn!(
+            "Telegram: no gateway.telegram_allowed_users set and dm_policy isn't 'open' — \
+             the bot will ignore everyone. Set an allowlist or dm_policy=open."
+        );
+    }
+
     loop {
         let url = format!("{}/getUpdates?timeout=30&offset={}", api, offset);
         let updates = match client.get(&url).send().await {
@@ -92,6 +104,17 @@ pub async fn start(config: Config, mcp: Option<std::sync::Arc<crate::core::mcp::
             let text = message["text"].as_str().unwrap_or("").trim().to_string();
             let chat_id = message["chat"]["id"].as_i64();
             let (Some(chat_id), false) = (chat_id, text.is_empty()) else { continue };
+
+            // Gate on the SENDER's user id (from.id); fall back to chat_id when
+            // `from` is absent (e.g. channel posts). Silently ignore non-allowed.
+            let sender_id = message["from"]["id"]
+                .as_i64()
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| chat_id.to_string());
+            if !crate::gateway::gate(&sender_id, &allowed_users, &dm_policy) {
+                tracing::debug!("Telegram: ignoring message from non-allowed user {}", sender_id);
+                continue;
+            }
 
             // On the first message for this chat after (re)start, restore the
             // persisted session if there is one, else start fresh.
