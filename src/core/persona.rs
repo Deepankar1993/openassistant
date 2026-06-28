@@ -191,6 +191,148 @@ impl Default for UserModel {
     }
 }
 
+/// Durable user insights extracted by the LLM from recent conversation.
+/// Every field is optional + `#[serde(default)]` so a partial or `{}` extraction
+/// merges cleanly. This is the structured contract we ask the model to emit.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UserInsights {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub what_to_call_them: Option<String>,
+    #[serde(default)]
+    pub technical_level: Option<String>,
+    #[serde(default)]
+    pub communication_style: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub interests: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Parse a `UserInsights` JSON object out of a (possibly fenced / chatty) model
+/// reply. Tolerant: grabs the outermost `{ .. }` span before deserializing.
+pub fn parse_insights(raw: &str) -> anyhow::Result<UserInsights> {
+    let json = extract_json_object(raw)
+        .ok_or_else(|| anyhow::anyhow!("no JSON object found in model output"))?;
+    let insights: UserInsights = serde_json::from_str(json)?;
+    Ok(insights)
+}
+
+/// Outermost `{...}` slice, ignoring code fences / prose around it.
+fn extract_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    if end > start {
+        Some(&s[start..=end])
+    } else {
+        None
+    }
+}
+
+/// Trim a candidate scalar; reject empty / sentinel / over-long values so the
+/// model can't poison a field with prose or "unknown".
+fn clean_scalar(v: &Option<String>) -> Option<String> {
+    let s = v.as_deref()?.trim();
+    if s.is_empty() || s.len() > 100 {
+        return None;
+    }
+    match s.to_lowercase().as_str() {
+        "unknown" | "n/a" | "none" | "null" => None,
+        _ => Some(s.to_string()),
+    }
+}
+
+/// Append new items not already present (case-insensitive), trimming blanks and
+/// capping to `cap` most-recent. Returns true if `dst` changed.
+fn merge_string_list(dst: &mut Vec<String>, src: &[String], cap: usize) -> bool {
+    let mut changed = false;
+    for item in src {
+        let item = item.trim();
+        if item.is_empty() || item.len() > 200 {
+            continue;
+        }
+        if !dst.iter().any(|e| e.eq_ignore_ascii_case(item)) {
+            dst.push(item.to_string());
+            changed = true;
+        }
+    }
+    if dst.len() > cap {
+        let drop = dst.len() - cap;
+        dst.drain(..drop);
+        changed = true;
+    }
+    changed
+}
+
+impl UserModel {
+    /// Conservatively merge LLM-extracted insights into this model. Scalars are
+    /// overwritten only when the extraction supplies a meaningful value; list
+    /// fields are unioned (case-insensitive, deduped) and capped. Returns true
+    /// if anything actually changed — pure/sync, so it is unit-testable without
+    /// a network call.
+    pub fn merge_insights(&mut self, insights: &UserInsights) -> bool {
+        let mut changed = false;
+
+        if let Some(v) = clean_scalar(&insights.name) {
+            if self.name != v {
+                self.name = v.clone();
+                changed = true;
+            }
+            // Adopt as the address term only while it's still the placeholder.
+            if self.what_to_call_them == "friend" && self.what_to_call_them != v {
+                self.what_to_call_them = v;
+                changed = true;
+            }
+        }
+        if let Some(v) = clean_scalar(&insights.what_to_call_them) {
+            if self.what_to_call_them != v {
+                self.what_to_call_them = v;
+                changed = true;
+            }
+        }
+        if let Some(v) = clean_scalar(&insights.technical_level) {
+            if self.technical_level != v {
+                self.technical_level = v;
+                changed = true;
+            }
+        }
+        if let Some(v) = clean_scalar(&insights.communication_style) {
+            if self.communication_style != v {
+                self.communication_style = v;
+                changed = true;
+            }
+        }
+        if let Some(v) = clean_scalar(&insights.timezone) {
+            if self.timezone != v {
+                self.timezone = v;
+                changed = true;
+            }
+        }
+        if let Some(v) = clean_scalar(&insights.language) {
+            if self.language != v {
+                self.language = v;
+                changed = true;
+            }
+        }
+
+        changed |= merge_string_list(&mut self.interests, &insights.interests, 50);
+        changed |= merge_string_list(&mut self.projects, &insights.projects, 50);
+        changed |= merge_string_list(&mut self.notes, &insights.notes, 100);
+
+        if changed {
+            self.updated_at = chrono::Utc::now();
+        }
+        changed
+    }
+}
+
 /// Combined context injected into every system prompt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullContext {
@@ -305,6 +447,90 @@ impl FullContext {
             }
         }
     }
+
+    /// LLM-based user modeling (Honcho-style), augmenting the naive keyword
+    /// `observe()`. Makes ONE chat-completions call over the recent transcript,
+    /// extracts durable facts as JSON, and merges them into `self.user`. Returns
+    /// `Ok(true)` when the model changed (so the caller knows to persist) —
+    /// persistence stays the caller's job, matching today's
+    /// `ctx.user.save(&workspace_dir)` path in `agent.rs`.
+    ///
+    /// Best-effort by contract: callers should `.ok()`/log the error and never
+    /// fail a turn on it.
+    pub async fn observe_llm(
+        &mut self,
+        recent: &[super::Message],
+        config: &crate::config::Config,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<bool> {
+        let transcript = render_transcript(recent);
+        if transcript.is_empty() {
+            return Ok(false);
+        }
+
+        let current = serde_json::json!({
+            "name": self.user.name,
+            "what_to_call_them": self.user.what_to_call_them,
+            "technical_level": self.user.technical_level,
+            "communication_style": self.user.communication_style,
+            "timezone": self.user.timezone,
+            "language": self.user.language,
+            "interests": self.user.interests,
+            "projects": self.user.projects,
+        });
+
+        let system = "You maintain a durable profile of a user for a personal AI assistant. \
+From the conversation, extract ONLY durable, high-confidence facts about the user: their name, \
+what to call them, technical_level (beginner/intermediate/advanced/expert), communication_style \
+(concise/detailed/technical/casual), timezone, preferred language, lasting interests, ongoing \
+projects, and short notes about goals or habits. Ignore one-off task details and anything you are \
+unsure about. Reply with ONE JSON object and nothing else, using only these optional keys: name, \
+what_to_call_them, technical_level, communication_style, timezone, language, interests (array of \
+short strings), projects (array of short strings), notes (array of short strings). Omit any key \
+you cannot fill confidently. Return {} if nothing durable is present.";
+
+        let user = format!(
+            "Existing profile (may be incomplete or default):\n{}\n\nRecent conversation:\n{}\n\n\
+Return the JSON object of new or refined durable facts.",
+            serde_json::to_string_pretty(&current).unwrap_or_default(),
+            transcript,
+        );
+
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+            serde_json::json!({ "role": "user", "content": user }),
+        ];
+
+        let (api_base, api_key, model) = crate::config::resolve_provider(config, "text");
+        let raw =
+            crate::core::agent::call_llm_raw(client, api_base, api_key, model, &messages).await?;
+
+        let insights = parse_insights(&raw)?;
+        Ok(self.user.merge_insights(&insights))
+    }
+}
+
+/// Render user/assistant turns as a compact, bounded transcript (skips
+/// system/tool noise). Shared shape with the session-summary writer.
+fn render_transcript(messages: &[super::Message]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let who = match m.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            _ => continue,
+        };
+        let body = m.content.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let body: String = body.chars().take(2000).collect();
+        out.push_str(who);
+        out.push_str(": ");
+        out.push_str(&body);
+        out.push('\n');
+    }
+    out.trim().to_string()
 }
 
 impl Default for FullContext {
@@ -390,6 +616,50 @@ mod tests {
         // No file written — should fall back to default and be empty.
         let loaded = UserModel::load_or_default(&dir.0);
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn parse_insights_extracts_json_from_fenced_text() {
+        let raw = "Here is the profile:\n```json\n\
+{ \"name\": \"Ada\", \"technical_level\": \"expert\", \
+\"interests\": [\"compilers\", \"Rust\"], \"projects\": [\"openAssistant\"], \
+\"notes\": [\"prefers terse answers\"] }\n```\ndone.";
+        let insights = parse_insights(raw).expect("should pull JSON out of fenced prose");
+
+        let mut model = UserModel::default();
+        assert!(model.merge_insights(&insights), "first merge changes the model");
+        assert_eq!(model.name, "Ada");
+        assert_eq!(model.what_to_call_them, "Ada", "name adopted over the 'friend' placeholder");
+        assert_eq!(model.technical_level, "expert");
+        assert!(model.interests.iter().any(|i| i == "Rust"));
+        assert!(model.projects.iter().any(|p| p == "openAssistant"));
+        assert!(model.notes.iter().any(|n| n.contains("terse")));
+
+        // Idempotent: merging identical insights again is a no-op.
+        assert!(!model.merge_insights(&insights), "re-merging identical insights changes nothing");
+    }
+
+    #[test]
+    fn merge_insights_rejects_empty_and_sentinel_values() {
+        let insights = parse_insights(
+            r#"{"name":"unknown","technical_level":"   ","interests":[""],"language":"n/a"}"#,
+        )
+        .unwrap();
+        let mut model = UserModel::default();
+        assert!(!model.merge_insights(&insights), "no usable fields => no change");
+        assert_eq!(model.name, "User");
+        assert_eq!(model.technical_level, "intermediate");
+        assert_eq!(model.language, "English");
+    }
+
+    #[test]
+    fn merge_insights_unions_lists_without_duplicates() {
+        let mut model = UserModel::default();
+        model.interests = vec!["Rust".to_string()];
+        let insights = parse_insights(r#"{"interests":["rust","music"]}"#).unwrap();
+        assert!(model.merge_insights(&insights));
+        // case-insensitive dedupe: "rust" not re-added, "music" appended.
+        assert_eq!(model.interests, vec!["Rust".to_string(), "music".to_string()]);
     }
 
     #[test]
