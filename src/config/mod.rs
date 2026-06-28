@@ -36,6 +36,41 @@ pub struct Config {
     /// change notifications. The `brief` CLI command works regardless.
     #[serde(default)]
     pub brief: BriefConfig,
+    /// Multi-source web-search providers. Empty keys ⇒ the `web_search` tool
+    /// stays on free DuckDuckGo; setting a provider key engages that real engine.
+    #[serde(default)]
+    pub search: WebSearchConfig,
+}
+
+/// Multi-source web-search provider keys + preferred engine. Mirrors the keys
+/// that `core::web_search::SearchConfig` already understands; an empty section
+/// reproduces the current DuckDuckGo-only behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// "", "duckduckgo", "brave", "tavily", "perplexity", "exa", "firecrawl".
+    /// Blank ⇒ auto-pick the first provider that has a key, else duckduckgo.
+    pub preferred_engine: String,
+    pub brave_api_key: String,
+    pub tavily_api_key: String,
+    pub perplexity_api_key: String,
+    pub exa_api_key: String,
+    pub firecrawl_api_key: String,
+    pub max_results: usize,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            preferred_engine: String::new(),
+            brave_api_key: String::new(),
+            tavily_api_key: String::new(),
+            perplexity_api_key: String::new(),
+            exa_api_key: String::new(),
+            firecrawl_api_key: String::new(),
+            max_results: 10,
+        }
+    }
 }
 
 /// Daily-brief / proactive messaging settings.
@@ -216,6 +251,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_modeling_every() -> usize {
+    6
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub discord_token: String,
@@ -249,6 +288,14 @@ pub struct GatewayConfig {
     /// text extracted, and folded into the conversation content (Hermes parity).
     #[serde(default = "default_true")]
     pub discord_attachments_enabled: bool,
+    /// Telegram user ids (`from.id`) allowed to use the bot. Empty list +
+    /// `dm_policy != "open"` ⇒ the bot ignores everyone (fail-closed), mirroring
+    /// Discord's gating. `"*"` allows anyone.
+    #[serde(default)]
+    pub telegram_allowed_users: Vec<String>,
+    /// Slack user ids allowed to use the bot. Same semantics as above.
+    #[serde(default)]
+    pub slack_allowed_users: Vec<String>,
     pub telegram_token: String,
     pub slack_token: String,
     pub slack_signing_secret: String,
@@ -272,6 +319,8 @@ impl Default for GatewayConfig {
             discord_free_response_channels: Vec::new(),
             discord_group_sessions_per_user: true,
             discord_attachments_enabled: true,
+            telegram_allowed_users: Vec::new(),
+            slack_allowed_users: Vec::new(),
             telegram_token: String::new(),
             slack_token: String::new(),
             slack_signing_secret: String::new(),
@@ -287,6 +336,19 @@ pub struct MemoryConfig {
     pub db_path: String,
     pub max_entries: usize,
     pub fts_enabled: bool,
+    /// Run an LLM "Honcho-style" user-modeling pass to extract durable facts
+    /// about the user (preferences, goals, communication style) into the
+    /// persisted UserModel. Off by default — adds one model call per eligible
+    /// turn. Augments the always-on naive keyword `observe()`.
+    #[serde(default)]
+    pub llm_user_modeling: bool,
+    /// When `llm_user_modeling` is on, run it at most once every N user turns.
+    #[serde(default = "default_modeling_every")]
+    pub modeling_every_n_turns: usize,
+    /// Write an LLM-generated session summary to `sessions_meta.summary` at the
+    /// end of each turn (off by default — one extra model call per turn).
+    #[serde(default)]
+    pub session_summaries: bool,
 }
 
 impl Default for MemoryConfig {
@@ -295,6 +357,9 @@ impl Default for MemoryConfig {
             db_path: format!("{}/memory.db", default_data_dir()),
             max_entries: 100_000,
             fts_enabled: true,
+            llm_user_modeling: false,
+            modeling_every_n_turns: default_modeling_every(),
+            session_summaries: false,
         }
     }
 }
@@ -418,6 +483,12 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         }
         "gateway.telegram_token" => config.gateway.telegram_token = value.to_string(),
         "gateway.slack_token" => config.gateway.slack_token = value.to_string(),
+        "gateway.telegram_allowed_users" => {
+            config.gateway.telegram_allowed_users = split_list(value)
+        }
+        "gateway.slack_allowed_users" => {
+            config.gateway.slack_allowed_users = split_list(value)
+        }
         "security.dm_pairing" => config.security.dm_pairing = value.parse().unwrap_or(true),
         "claude.enabled" => config.claude.enabled = value.parse().unwrap_or(false),
         "claude.bin" => config.claude.bin = value.to_string(),
@@ -440,6 +511,24 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         "permissions.allow" => config.permissions.allow = split_list(value),
         "permissions.ask" => config.permissions.ask = split_list(value),
         "permissions.deny" => config.permissions.deny = split_list(value),
+        "memory.llm_user_modeling" => {
+            config.memory.llm_user_modeling = value.parse().unwrap_or(false)
+        }
+        "memory.modeling_every_n_turns" => {
+            config.memory.modeling_every_n_turns = value.parse().unwrap_or(6)
+        }
+        "memory.session_summaries" => {
+            config.memory.session_summaries = value.parse().unwrap_or(false)
+        }
+        "search.preferred_engine" => config.search.preferred_engine = value.to_string(),
+        "search.brave_api_key" => config.search.brave_api_key = value.to_string(),
+        "search.tavily_api_key" => config.search.tavily_api_key = value.to_string(),
+        "search.perplexity_api_key" => config.search.perplexity_api_key = value.to_string(),
+        "search.exa_api_key" => config.search.exa_api_key = value.to_string(),
+        "search.firecrawl_api_key" => config.search.firecrawl_api_key = value.to_string(),
+        "search.max_results" => {
+            config.search.max_results = value.parse().unwrap_or(10)
+        }
         _ => tracing::warn!("Unknown config key: {}", key),
     }
     save(&config).await?;
