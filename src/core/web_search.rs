@@ -56,6 +56,49 @@ impl WebSearch {
         Self { config: SearchConfig::default() }
     }
 
+    /// Build a `WebSearch` whose engines are populated from the user's config
+    /// (`[search]` section). When a provider key is set, that engine hits the
+    /// real API instead of silently falling back to DuckDuckGo. `default_engine`
+    /// is the configured `preferred_engine`; when blank it auto-selects the
+    /// first provider that actually has a key (Brave → Tavily → Perplexity →
+    /// Exa → Firecrawl), else DuckDuckGo.
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        let s = &cfg.search;
+        let default_engine = if !s.preferred_engine.trim().is_empty() {
+            s.preferred_engine.trim().to_lowercase()
+        } else if !s.brave_api_key.is_empty() {
+            "brave".to_string()
+        } else if !s.tavily_api_key.is_empty() {
+            "tavily".to_string()
+        } else if !s.perplexity_api_key.is_empty() {
+            "perplexity".to_string()
+        } else if !s.exa_api_key.is_empty() {
+            "exa".to_string()
+        } else if !s.firecrawl_api_key.is_empty() {
+            "firecrawl".to_string()
+        } else {
+            "duckduckgo".to_string()
+        };
+        let max_results = if s.max_results == 0 { 10 } else { s.max_results };
+        Self {
+            config: SearchConfig {
+                default_engine,
+                brave_api_key: s.brave_api_key.clone(),
+                perplexity_api_key: s.perplexity_api_key.clone(),
+                exa_api_key: s.exa_api_key.clone(),
+                firecrawl_api_key: s.firecrawl_api_key.clone(),
+                tavily_api_key: s.tavily_api_key.clone(),
+                max_results,
+                ..SearchConfig::default()
+            },
+        }
+    }
+
+    /// Engine the agent should use when the model doesn't name one explicitly.
+    pub fn default_engine(&self) -> &str {
+        &self.config.default_engine
+    }
+
     /// Search using the default engine
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         self.search_with(&self.config.default_engine, query).await
@@ -339,5 +382,46 @@ impl WebSearch {
     async fn search_google(&self, query: &str) -> Result<Vec<SearchResult>> {
         // Fall back to DuckDuckGo (free, no API key needed)
         self.search_duckduckgo(query).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn from_config_defaults_to_duckduckgo_when_no_keys() {
+        let ws = WebSearch::from_config(&Config::default());
+        assert_eq!(ws.default_engine(), "duckduckgo");
+    }
+
+    #[test]
+    fn explicit_preferred_engine_wins() {
+        let mut cfg = Config::default();
+        cfg.search.preferred_engine = "Tavily".into(); // case-insensitive
+        cfg.search.tavily_api_key = "tvly-xxx".into();
+        let ws = WebSearch::from_config(&cfg);
+        assert_eq!(ws.default_engine(), "tavily");
+    }
+
+    #[test]
+    fn a_set_key_auto_engages_that_engine() {
+        // No preferred_engine, but a Brave key is present ⇒ Brave becomes default
+        // (priority Brave > Tavily > Perplexity > Exa > Firecrawl).
+        let mut cfg = Config::default();
+        cfg.search.brave_api_key = "brave-key".into();
+        let ws = WebSearch::from_config(&cfg);
+        assert_eq!(ws.default_engine(), "brave");
+    }
+
+    #[test]
+    fn keys_are_threaded_into_search_config() {
+        let mut cfg = Config::default();
+        cfg.search.brave_api_key = "brave-key".into();
+        cfg.search.max_results = 7;
+        let ws = WebSearch::from_config(&cfg);
+        assert_eq!(ws.config.brave_api_key, "brave-key"); // same-module: private field readable
+        assert_eq!(ws.config.max_results, 7);
     }
 }
