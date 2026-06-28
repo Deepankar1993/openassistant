@@ -265,6 +265,10 @@ impl Agent {
             Self::fire_hook(&hooks, super::hooks::HookEvent::UserPromptSubmit, hc).await;
         }
 
+        // Config for opt-in memory features (best-effort: never fail a turn on a
+        // config read — the strict permissions load below stays as-is).
+        let cfg = crate::config::load().await.unwrap_or_default();
+
         // Hydrate the auto-learned user model from disk once per turn, before
         // observing — so a fresh FullContext picks up prior learning. Only load
         // when the in-memory model is still empty, to avoid clobbering a model
@@ -278,6 +282,30 @@ impl Agent {
 
         // Learn from conversation
         ctx.observe(message);
+
+        // LLM-based user modeling (Honcho-style), augmenting the keyword
+        // observe() above. Opt-in (memory.llm_user_modeling), operator turns
+        // only (skip gateway/sub-agent fan-out), throttled to every N turns.
+        // Mutates ctx.user in place; the persist block below writes it out.
+        if cfg.memory.llm_user_modeling && self.operator && !self.workspace_dir.is_empty() {
+            let n = cfg.memory.modeling_every_n_turns.max(1);
+            // Throttle on genuine USER turns. Counting total messages is wrong:
+            // tool-free sessions grow by 2/turn, so an even N would never divide
+            // an odd total and the pass would never fire. Tool-result messages
+            // also carry role "user", so exclude them.
+            let user_turns = session
+                .messages()
+                .iter()
+                .filter(|m| m.role == "user" && !m.content.starts_with("[TOOL RESULT:"))
+                .count();
+            if user_turns > 0 && user_turns % n == 0 {
+                let recent = session.last_n_messages(12).to_vec();
+                let client = reqwest::Client::new();
+                if let Err(e) = ctx.observe_llm(&recent, &cfg, &client).await {
+                    tracing::warn!("llm user-modeling skipped: {e}");
+                }
+            }
+        }
 
         // Persist the freshly-updated user model off the async thread (sync fs
         // write), best-effort: never fail the turn.
@@ -441,6 +469,33 @@ impl Agent {
         // Add assistant response to session
         session.add_message(Message::assistant(&final_response));
 
+        // Session summary (opt-in): write an LLM-generated summary into the
+        // previously-orphaned sessions_meta.summary column. The async LLM call
+        // holds no SQLite handle; the sync write runs in spawn_blocking (mirrors
+        // the facts read above).
+        if cfg.memory.session_summaries && !self.workspace_dir.is_empty() {
+            let client = reqwest::Client::new();
+            let msgs = session.messages().to_vec();
+            if let Ok(summary) =
+                crate::memory::store::MemoryStore::generate_session_summary(&client, &cfg, &msgs).await
+            {
+                if !summary.is_empty() {
+                    let dir = self.workspace_dir.clone();
+                    let id = session.id.clone();
+                    let channel = session.channel.clone();
+                    let user_id = session.user_id.clone();
+                    let count = session.messages().len() as i64;
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(store) = crate::memory::store::MemoryStore::open_in(&dir) {
+                            let _ = store.set_session_summary(&id, &channel, &user_id, count, &summary);
+                        }
+                    })
+                    .await
+                    .ok();
+                }
+            }
+        }
+
         // Stop hook (end of turn).
         {
             let mut hc = self.hook_ctx(session, "stop");
@@ -529,6 +584,22 @@ impl Agent {
             push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"create_skill\",\"name\":\"...\",\"content\":\"...\"}] to create new skills");
             push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"self_update\"}] to check for openAssistant updates");
             push_str(&mut prompt, "- Use [TOOL:name:{\"action\":\"run_command\",\"command\":\"...\"}] to run terminal commands (with user permission)");
+
+            // Available skills — advertise name + one-line description so the
+            // model knows which skills it can run via self_manage's `run` action.
+            // Loaded the same way run_skill does (builtins + <workspace>/skills),
+            // so the advertised set exactly matches what `run` can resolve.
+            let mut skill_engine =
+                crate::skills::engine::SkillEngine::load_builtin().unwrap_or_default();
+            let _ = skill_engine.load_from_dir(&format!("{}/skills", self.workspace_dir));
+            let skill_summaries = skill_engine.list_summaries();
+            if !skill_summaries.is_empty() {
+                push_str(&mut prompt, "\n# Available Skills");
+                push_str(&mut prompt, "Run one with [TOOL:self_manage:{\"action\":\"run\",\"name\":\"<skill>\",\"input\":\"<task>\"}]. The skill runs in a scoped sub-agent limited to its own allowed tools.");
+                for (name, desc) in &skill_summaries {
+                    push_str(&mut prompt, &format!("- **{}**: {}", name, desc));
+                }
+            }
 
             // Multi-agent goal deliberation instructions
             push_str(&mut prompt, "\n# Multi-Agent Goal Deliberation");
@@ -708,8 +779,15 @@ impl Agent {
                 if query.is_empty() {
                     return Ok("web_search: missing 'query' argument.".to_string());
                 }
-                let engine = tool_call.arguments["engine"].as_str().unwrap_or("duckduckgo");
-                let ws = crate::core::web_search::WebSearch::default();
+                // Build from config so a configured provider key (Brave/Tavily/
+                // Perplexity/Exa/Firecrawl) actually engages instead of always
+                // falling back to DuckDuckGo. When the model omits `engine`, use
+                // the configured preferred engine.
+                let config = crate::config::load().await?;
+                let ws = crate::core::web_search::WebSearch::from_config(&config);
+                let engine = tool_call.arguments["engine"]
+                    .as_str()
+                    .unwrap_or_else(|| ws.default_engine());
                 match ws.search_with(engine, query).await {
                     Ok(results) if results.is_empty() => {
                         Ok(format!("Web search ({}): no results for '{}'.", engine, query))
@@ -1033,6 +1111,49 @@ impl Agent {
                     Err(e) => {
                         tracing::warn!("standing order '{}' RunSkill '{}' failed: {}", order.name, skill_name, e);
                     }
+                }
+            }
+            OrderAction::RunTool { tool_name, arguments } => {
+                // A tool can run shell/bash/file ops → gate like RunCommand: operator only.
+                if !self.operator {
+                    tracing::warn!("standing order '{}' RunTool skipped (remote origin)", order.name);
+                    return;
+                }
+                match super::standing_orders::execute_run_tool(tool_name, arguments).await {
+                    Ok(out) => {
+                        info!("standing order '{}' ran tool '{}'", order.name, tool_name);
+                        ctx_out.push(format!("# Tool '{}' result\n{}", tool_name, out));
+                    }
+                    Err(e) => tracing::warn!(
+                        "standing order '{}' RunTool '{}' failed: {}", order.name, tool_name, e
+                    ),
+                }
+            }
+            OrderAction::SendMessage { text } => {
+                // Proactive push to the owner's Discord/Telegram. The text is
+                // author-controlled in the order, so any origin may fire it; it
+                // only delivers if a proactive channel is configured. But a
+                // remote (gateway) turn must NOT echo the remote user's own
+                // message back out (spam/forgery vector), so the {{message}}
+                // placeholder is disallowed off-operator.
+                if !self.operator && text.contains("{{message}}") {
+                    tracing::warn!(
+                        "standing order '{}' SendMessage skipped: {{{{message}}}} placeholder not allowed on remote origin",
+                        order.name
+                    );
+                    return;
+                }
+                let rendered = render_template(text, message, message_count);
+                match crate::config::load().await {
+                    Ok(cfg) => {
+                        crate::gateway::proactive::deliver_standing_message(
+                            &cfg, &order.name, &rendered,
+                        )
+                        .await;
+                    }
+                    Err(e) => tracing::warn!(
+                        "standing order '{}' SendMessage: config load failed: {}", order.name, e
+                    ),
                 }
             }
             other => {
@@ -1412,6 +1533,19 @@ impl Agent {
                 }
                 Ok(format!("Updated user.{} = {}", key, value))
             }
+            "run" => {
+                // Self-invoke a skill: runs it in a scoped, depth-limited
+                // sub-agent (run_skill enforces the depth-1 guard + tool scope).
+                let name = args["name"].as_str().unwrap_or("");
+                if name.is_empty() {
+                    return Ok("self_manage run: missing 'name' (the skill to run).".to_string());
+                }
+                let input = args["input"].as_str().unwrap_or("");
+                match self.run_skill(name, input).await {
+                    Ok(out) => Ok(format!("Skill '{}' result:\n{}", name, out)),
+                    Err(e) => Ok(format!("Skill '{}' failed: {}", name, e)),
+                }
+            }
             _ => Ok(format!("Unknown self_manage action: {}", action)),
         }
     }
@@ -1527,7 +1661,7 @@ impl Agent {
             },
             ToolDefinition {
                 name: "self_manage".to_string(),
-                description: "Self-management. Args: {\"action\": \"read_skill|create_skill|update_memory|list_skills|run_command|self_update|set_persona|set_user\"}".to_string(),
+                description: "Self-management. Args: {\"action\": \"run|read_skill|create_skill|update_memory|list_skills|run_command|self_update|set_persona|set_user\"}. action=run executes a named skill in a scoped sub-agent: {\"action\":\"run\",\"name\":\"<skill>\",\"input\":\"<task>\"}.".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {"action": {"type": "string"}}}),
             },
             ToolDefinition {

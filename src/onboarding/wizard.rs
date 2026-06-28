@@ -104,7 +104,9 @@ pub async fn run_wizard() -> Result<()> {
             db_path: format!("{}/memory.db", data_dir),
             max_entries: 100_000,
             fts_enabled: true,
+            ..Default::default()
         },
+        search: crate::config::WebSearchConfig::default(),
         skills: crate::config::SkillsConfig {
             dirs: if skill_dirs.is_empty() {
                 vec![format!("{}/skills", data_dir)]

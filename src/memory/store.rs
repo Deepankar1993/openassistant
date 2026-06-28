@@ -314,6 +314,98 @@ impl MemoryStore {
         )?;
         Ok(count)
     }
+
+    /// Insert-or-update a session's metadata row, writing its `summary` and
+    /// `message_count`. Upsert keyed on `id` (== the `Session.id`): the first
+    /// call creates the row, later calls refresh the summary in place. This is
+    /// the first writer for the previously-orphaned `sessions_meta.summary`
+    /// column.
+    pub fn set_session_summary(
+        &self,
+        session_id: &str,
+        channel: &str,
+        user_id: &str,
+        message_count: i64,
+        summary: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO sessions_meta
+                 (id, channel, user_id, message_count, summary, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                 channel       = excluded.channel,
+                 user_id       = excluded.user_id,
+                 message_count = excluded.message_count,
+                 summary       = excluded.summary,
+                 updated_at    = excluded.updated_at",
+            params![session_id, channel, user_id, message_count, summary, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session's stored summary, if any. `Ok(None)` when the row is
+    /// absent or its `summary` column is NULL.
+    pub fn get_session_summary(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT summary FROM sessions_meta WHERE id = ?1")?;
+        let result =
+            stmt.query_row(params![session_id], |row| row.get::<_, Option<String>>(0));
+        match result {
+            Ok(s) => Ok(s),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Generate a short (2–4 sentence) summary of a conversation via ONE LLM
+    /// call, reusing the agent's `call_llm_raw` and the configured `text`
+    /// provider. Associated (no `self`) and touches NO SQLite, so the returned
+    /// future is `Send` and contains no `rusqlite::Connection` across `.await`.
+    /// The caller persists the result with `set_session_summary`. Returns an
+    /// empty string when there is nothing to summarize.
+    pub async fn generate_session_summary(
+        client: &reqwest::Client,
+        config: &crate::config::Config,
+        messages: &[crate::core::Message],
+    ) -> Result<String> {
+        let mut transcript = String::new();
+        for m in messages {
+            let who = match m.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => continue,
+            };
+            let body = m.content.trim();
+            if body.is_empty() {
+                continue;
+            }
+            let body: String = body.chars().take(2000).collect();
+            transcript.push_str(who);
+            transcript.push_str(": ");
+            transcript.push_str(&body);
+            transcript.push('\n');
+        }
+        let transcript = transcript.trim();
+        if transcript.is_empty() {
+            return Ok(String::new());
+        }
+
+        let system = "Summarize the following conversation between a user and an AI assistant in \
+2-4 sentences. Capture the main topics, what the user wanted, and any decisions or outcomes. \
+Write plain prose in the third person, with no preamble.";
+        let llm_messages = vec![
+            serde_json::json!({ "role": "system", "content": system }),
+            serde_json::json!({ "role": "user", "content": transcript }),
+        ];
+
+        let (api_base, api_key, model) = crate::config::resolve_provider(config, "text");
+        let raw =
+            crate::core::agent::call_llm_raw(client, api_base, api_key, model, &llm_messages)
+                .await?;
+        Ok(raw.trim().to_string())
+    }
 }
 
 #[cfg(test)]
@@ -389,5 +481,29 @@ mod tests {
         let id = s.store(&entry("z", "v", 0.5)).unwrap();
         s.update(id, "v", 9.0).unwrap();
         assert!((s.list_all(1).unwrap()[0].importance - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn session_summary_upsert_and_get_round_trip() {
+        let (_dir, s) = store();
+        assert!(s.get_session_summary("sess-1").unwrap().is_none(), "absent before write");
+
+        s.set_session_summary("sess-1", "cli", "local", 4, "Talked about Rust.").unwrap();
+        assert_eq!(
+            s.get_session_summary("sess-1").unwrap().as_deref(),
+            Some("Talked about Rust."),
+        );
+
+        // Upsert refreshes the same row (no duplicate, summary replaced).
+        s.set_session_summary("sess-1", "cli", "local", 6, "Talked about Rust and SQLite.").unwrap();
+        assert_eq!(
+            s.get_session_summary("sess-1").unwrap().as_deref(),
+            Some("Talked about Rust and SQLite."),
+        );
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "upsert keeps exactly one row");
     }
 }

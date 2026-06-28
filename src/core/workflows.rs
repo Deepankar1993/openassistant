@@ -281,6 +281,19 @@ impl WorkflowEngine {
             let (b, k, m) = crate::config::resolve_provider(cfg, "text");
             (b.to_string(), k.to_string(), m.to_string())
         });
+        // Model + workspace for the scoped sub-agent step path. `None` (stub
+        // engine) => steps fall back to call_llm_raw / simulate. The Agent
+        // resolves the provider (api_base/api_key) itself from the global config
+        // at call time, so only the model name and workspace dir need threading.
+        let agent_params: Option<(String, String)> = self.config.as_ref().map(|cfg| {
+            let (_b, _k, model) = crate::config::resolve_provider(cfg, "text");
+            let ws = if cfg.general.data_dir.trim().is_empty() {
+                crate::config::data_dir_default()
+            } else {
+                cfg.general.data_dir.clone()
+            };
+            (model.to_string(), ws)
+        });
         let client = reqwest::Client::new();
 
         let mut run = WorkflowRun {
@@ -386,70 +399,130 @@ impl WorkflowEngine {
                 let input_ctx = if is_root { input.map(|s| s.to_string()) } else { None };
                 let llm_clone = llm.clone();
                 let client_clone = client.clone();
+                let agent_params_clone = agent_params.clone();
 
                 let handle = tokio::spawn(async move {
                     let start = chrono::Utc::now();
                     debug!("Executing workflow step: {}", step_clone.id);
 
-                    match &llm_clone {
-                        Some((base, key, model)) => {
-                            let mut user = String::new();
-                            if let Some(inp) = &input_ctx {
-                                if !inp.is_empty() {
-                                    user.push_str("Input:\n");
-                                    user.push_str(inp);
-                                    user.push_str("\n\n");
+                    // Compose the per-step task text (input + upstream outputs + task).
+                    let mut user = String::new();
+                    if let Some(inp) = &input_ctx {
+                        if !inp.is_empty() {
+                            user.push_str("Input:\n");
+                            user.push_str(inp);
+                            user.push_str("\n\n");
+                        }
+                    }
+                    if !dep_context.is_empty() {
+                        user.push_str("Context from previous steps:\n");
+                        user.push_str(&dep_context);
+                        user.push_str("\n\n");
+                    }
+                    user.push_str(&format!("Task: {}", step_clone.description));
+
+                    // Path A — a step that DECLARES tools runs as a REAL scoped
+                    // sub-agent (honoring step.tools + step.agent_type) when the
+                    // engine has a config. Otherwise Path B preserves old behavior.
+                    if step_runs_as_subagent(&step_clone, agent_params_clone.is_some()) {
+                        let (model, workspace) = agent_params_clone.clone().unwrap();
+                        let role = match step_clone.agent_type.as_deref() {
+                            Some("Explore") => "fast exploration agent (find files, search code, map structure)",
+                            Some("Plan") => "planning/design agent (implementation plans, architecture)",
+                            Some(other) if !other.is_empty() => other,
+                            _ => "general-purpose agent for multi-step work requiring tool use",
+                        };
+
+                        // Depth-limited (no nested sub-agents → no runaway
+                        // recursion), NON-operator (Agent::new leaves
+                        // operator=false → hooks never fire), tools scoped to
+                        // exactly what the step declared.
+                        let mut agent = super::agent::Agent::new(model)
+                            .with_workspace(workspace)
+                            .with_tools_enabled(true)
+                            .with_permission_mode(super::permissions::PermissionMode::BypassPermissions);
+                        agent.depth = 1;
+
+                        let available: Vec<String> = agent.tools.iter().map(|t| t.name.clone()).collect();
+                        let allowed = scoped_tool_names(step_clone.tools.as_deref(), &available);
+                        agent.tools.retain(|t| allowed.contains(&t.name));
+
+                        let prompt = format!(
+                            "You are a {role}. You are executing step '{}' of a multi-step workflow. \
+                             Use your tools as needed and report a focused result for THIS step only.\n\n{user}",
+                            step_clone.id
+                        );
+
+                        let mut child_ctx = super::persona::FullContext::new();
+                        let mut child_session = super::session::Session::new("workflow", "local");
+
+                        match Box::pin(agent.process(&prompt, &mut child_ctx, &mut child_session)).await {
+                            Ok(out) => StepResult {
+                                step_id: step_clone.id.clone(),
+                                status: WorkflowStatus::Completed,
+                                output: Some(out),
+                                error: None,
+                                start_time: start,
+                                end_time: Some(chrono::Utc::now()),
+                            },
+                            Err(e) => StepResult {
+                                step_id: step_clone.id.clone(),
+                                status: WorkflowStatus::Failed,
+                                output: None,
+                                error: Some(e.to_string()),
+                                start_time: start,
+                                end_time: Some(chrono::Utc::now()),
+                            },
+                        }
+                    } else {
+                        // Path B — UNCHANGED graceful fallback: bare completion
+                        // when a model is resolved, else the deterministic
+                        // simulate result (tool-free steps and no-config stub).
+                        match &llm_clone {
+                            Some((base, key, model)) => {
+                                let messages = vec![
+                                    serde_json::json!({
+                                        "role": "system",
+                                        "content": format!(
+                                            "You are executing step '{}' of a multi-step workflow. \
+                                             Produce a focused, useful result for THIS step only.",
+                                            step_clone.id
+                                        )
+                                    }),
+                                    serde_json::json!({ "role": "user", "content": user }),
+                                ];
+
+                                match super::agent::call_llm_raw(&client_clone, base, key, model, &messages).await {
+                                    Ok(out) => StepResult {
+                                        step_id: step_clone.id.clone(),
+                                        status: WorkflowStatus::Completed,
+                                        output: Some(out),
+                                        error: None,
+                                        start_time: start,
+                                        end_time: Some(chrono::Utc::now()),
+                                    },
+                                    Err(e) => StepResult {
+                                        step_id: step_clone.id.clone(),
+                                        status: WorkflowStatus::Failed,
+                                        output: None,
+                                        error: Some(e.to_string()),
+                                        start_time: start,
+                                        end_time: Some(chrono::Utc::now()),
+                                    },
                                 }
                             }
-                            if !dep_context.is_empty() {
-                                user.push_str("Context from previous steps:\n");
-                                user.push_str(&dep_context);
-                                user.push_str("\n\n");
-                            }
-                            user.push_str(&format!("Task: {}", step_clone.description));
-
-                            let messages = vec![
-                                serde_json::json!({
-                                    "role": "system",
-                                    "content": format!(
-                                        "You are executing step '{}' of a multi-step workflow. \
-                                         Produce a focused, useful result for THIS step only.",
-                                        step_clone.id
-                                    )
-                                }),
-                                serde_json::json!({ "role": "user", "content": user }),
-                            ];
-
-                            match super::agent::call_llm_raw(&client_clone, base, key, model, &messages).await {
-                                Ok(out) => StepResult {
-                                    step_id: step_clone.id.clone(),
-                                    status: WorkflowStatus::Completed,
-                                    output: Some(out),
-                                    error: None,
-                                    start_time: start,
-                                    end_time: Some(chrono::Utc::now()),
-                                },
-                                Err(e) => StepResult {
-                                    step_id: step_clone.id.clone(),
-                                    status: WorkflowStatus::Failed,
-                                    output: None,
-                                    error: Some(e.to_string()),
-                                    start_time: start,
-                                    end_time: Some(chrono::Utc::now()),
-                                },
-                            }
+                            None => StepResult {
+                                step_id: step_clone.id.clone(),
+                                status: WorkflowStatus::Completed,
+                                output: Some(format!(
+                                    "[simulated] Step '{}': {}",
+                                    step_clone.id, step_clone.description
+                                )),
+                                error: None,
+                                start_time: start,
+                                end_time: Some(chrono::Utc::now()),
+                            },
                         }
-                        None => StepResult {
-                            step_id: step_clone.id.clone(),
-                            status: WorkflowStatus::Completed,
-                            output: Some(format!(
-                                "[simulated] Step '{}': {}",
-                                step_clone.id, step_clone.description
-                            )),
-                            error: None,
-                            start_time: start,
-                            end_time: Some(chrono::Utc::now()),
-                        },
                     }
                 });
                 handles.push(handle);
@@ -583,4 +656,94 @@ pub fn built_in_workflows() -> Vec<WorkflowDef> {
             },
         ],
     }]
+}
+
+/// True when a step should run as a scoped sub-agent: it declares a non-empty
+/// tool list AND the engine has a config (so a model/workspace can be resolved).
+fn step_runs_as_subagent(step: &WorkflowStep, has_config: bool) -> bool {
+    has_config && step.tools.as_ref().map_or(false, |t| !t.is_empty())
+}
+
+/// Intersect a step's declared tool names with the agent's available tools
+/// (case-insensitive). Unknown declared names are dropped; an empty/None
+/// declaration yields an empty scope (the step takes the tool-free path).
+fn scoped_tool_names(declared: Option<&[String]>, available: &[String]) -> Vec<String> {
+    match declared {
+        Some(list) if !list.is_empty() => available
+            .iter()
+            .filter(|name| list.iter().any(|a| a.eq_ignore_ascii_case(name)))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_tool_names_intersects_case_insensitively() {
+        let available = vec!["read".to_string(), "grep".to_string(), "bash".to_string()];
+        let declared = vec!["Read".to_string(), "Grep".to_string(), "nonexistent".to_string()];
+        // Unknown "nonexistent" dropped; case-insensitive match keeps read+grep.
+        assert_eq!(
+            scoped_tool_names(Some(&declared), &available),
+            vec!["read".to_string(), "grep".to_string()]
+        );
+    }
+
+    #[test]
+    fn tool_free_step_takes_fallback_not_subagent() {
+        let available = vec!["read".to_string()];
+        let empty: Vec<String> = Vec::new();
+        assert!(scoped_tool_names(None, &available).is_empty());
+        assert!(scoped_tool_names(Some(&empty), &available).is_empty());
+
+        let step = WorkflowStep {
+            id: "s".into(),
+            description: "d".into(),
+            agent_type: None,
+            tools: None,
+            depends_on: None,
+            parallel: false,
+        };
+        // Even with a config present, a tool-free step does NOT spawn a sub-agent.
+        assert!(!step_runs_as_subagent(&step, true));
+    }
+
+    #[test]
+    fn declared_tools_select_subagent_only_with_config() {
+        let step = WorkflowStep {
+            id: "s".into(),
+            description: "d".into(),
+            agent_type: Some("Explore".into()),
+            tools: Some(vec!["read".into()]),
+            depends_on: None,
+            parallel: false,
+        };
+        assert!(step_runs_as_subagent(&step, true)); // real engine
+        assert!(!step_runs_as_subagent(&step, false)); // stub engine -> fallback
+    }
+
+    #[tokio::test]
+    async fn tool_free_step_completes_via_simulate_without_network() {
+        // Stub engine (config = None) => Path B simulate, no HTTP made.
+        let mut engine = WorkflowEngine::new();
+        engine.register_workflow(WorkflowDef {
+            name: "wf".into(),
+            description: "d".into(),
+            steps: vec![WorkflowStep {
+                id: "only".into(),
+                description: "do a thing".into(),
+                agent_type: None,
+                tools: None,
+                depends_on: None,
+                parallel: false,
+            }],
+        });
+        let out = engine.execute("wf", None).await.unwrap();
+        assert!(out.contains("[simulated]"), "tool-free no-config step must simulate: {out}");
+        assert!(out.contains("Completed"), "step should complete: {out}");
+    }
 }

@@ -197,6 +197,13 @@ async fn post_everywhere(cfg: &Config, text: &str) {
     }
 }
 
+/// Deliver a standing order's `SendMessage` action to the configured proactive
+/// channels (Discord home channel + Telegram chat), reusing `post_everywhere`.
+/// Public so the agent loop can call it when a `SendMessage` order fires.
+pub async fn deliver_standing_message(cfg: &Config, order_name: &str, text: &str) {
+    post_everywhere(cfg, &format!("📢 {}\n\n{}", order_name, text)).await;
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }

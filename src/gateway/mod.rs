@@ -13,6 +13,20 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::security::allowlist::is_allowed;
+
+/// Shared access-control gate for messaging channels, mirroring Discord's policy
+/// (`discord.rs::gate`). Returns true if `user_id` may be served.
+///
+/// - Non-empty `allowed`: only ids in the list (or the `"*"` wildcard) pass.
+/// - Empty `allowed`: open **iff** `dm_policy == "open"`; otherwise everyone is
+///   ignored (fail-closed). Reuses `security::allowlist::is_allowed`.
+pub fn gate(user_id: &str, allowed: &[String], dm_policy: &str) -> bool {
+    if !allowed.is_empty() {
+        return is_allowed(user_id, allowed);
+    }
+    dm_policy == "open"
+}
 
 /// One gateway setup requirement, surfaced identically in the CLI
 /// (`openassistant gateway --check`) and the desktop Channels panel.
@@ -257,4 +271,30 @@ pub async fn check() -> Result<()> {
         return Err(anyhow::anyhow!("No messaging channels configured"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gate;
+
+    #[test]
+    fn gate_allows_listed_users_only() {
+        let allowed = vec!["U123".to_string()];
+        assert!(gate("U123", &allowed, "pairing"));
+        assert!(!gate("U999", &allowed, "pairing"));
+    }
+
+    #[test]
+    fn gate_empty_allowlist_respects_policy() {
+        // No allowlist: open policy lets anyone in; anything else ignores all.
+        assert!(gate("U123", &[], "open"));
+        assert!(!gate("U123", &[], "pairing"));
+        assert!(!gate("U123", &[], ""));
+    }
+
+    #[test]
+    fn gate_wildcard_allows_anyone() {
+        let allowed = vec!["*".to_string()];
+        assert!(gate("anyone", &allowed, "pairing"));
+    }
 }

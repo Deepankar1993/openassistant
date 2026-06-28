@@ -46,10 +46,19 @@ pub async fn events_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("bad json: {e}")).into_response(),
     };
 
-    // 1) URL verification handshake — echo the challenge.
+    // 1) URL verification handshake — echo the challenge. Allowed even without a
+    // signing secret so the endpoint can be registered before the secret is set.
     if payload["type"] == "url_verification" {
         let challenge = payload["challenge"].as_str().unwrap_or("").to_string();
         return (StatusCode::OK, challenge).into_response();
+    }
+
+    // Fail closed: without a signing secret we cannot authenticate event
+    // callbacks (the `user` field would be attacker-forgeable), so refuse them.
+    // The access-control gate below trusts that field, so this MUST run first.
+    if secret.is_empty() {
+        warn!("Slack event rejected: no gateway.slack_signing_secret configured");
+        return (StatusCode::UNAUTHORIZED, "signing secret not configured").into_response();
     }
 
     // 2) Event callback — handle user message events.
@@ -62,7 +71,16 @@ pub async fn events_handler(
             let text = event["text"].as_str().unwrap_or("").trim().to_string();
             let channel = event["channel"].as_str().unwrap_or("").to_string();
             let user = event["user"].as_str().unwrap_or("unknown").to_string();
-            if !text.is_empty() && !channel.is_empty() {
+            // Access control (mirrors Discord): allow-listed users only, or —
+            // empty list — everyone iff dm_policy == "open". Still ack with 200.
+            let allowed = super::gate(
+                &user,
+                &state.config.gateway.slack_allowed_users,
+                &state.config.gateway.dm_policy,
+            );
+            if !allowed {
+                debug!("Slack: ignoring message from non-allowed user {}", user);
+            } else if !text.is_empty() && !channel.is_empty() {
                 // Respond out-of-band: Slack requires a 200 within 3 seconds.
                 let state = state.clone();
                 tokio::spawn(async move {
