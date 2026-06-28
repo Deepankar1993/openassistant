@@ -56,6 +56,17 @@ pub enum OrderAction {
     Webhook { url: String, body: String },
 }
 
+/// Execute a `RunTool` standing-order action against the global tool registry
+/// (`bash`, `shell`, `read`/`file`, `glob`, `grep`, `browser`, `vision`).
+/// Returns the tool's textual output. The CALLER must origin-gate this — a tool
+/// can run shell/bash, exactly like `RunCommand`.
+pub async fn execute_run_tool(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> anyhow::Result<String> {
+    crate::tools::ToolRegistry::execute(tool_name, arguments).await
+}
+
 /// Standing orders engine
 #[derive(Debug, Default)]
 pub struct StandingOrdersEngine {
