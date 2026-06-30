@@ -11,6 +11,7 @@ pub mod memory;
 pub mod onboarding;
 pub mod persona;
 pub mod schedules;
+pub mod autostart;
 pub mod settings;
 pub mod skills;
 pub mod system;

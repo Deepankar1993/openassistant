@@ -30,6 +30,9 @@
 //!   Gateway channels    — WebChat/Discord/Telegram/Slack all run the real
 //!                         Agent::process loop (gateway/); Slack needs a public URL.
 //!   goal_deliberate     — real per-role LLM deliberation + persisted goals/subgoals.
+//!   Always-on desktop   — system-tray background running (close→hide to tray),
+//!                         gateway auto-start + keep-alive, launch-at-login
+//!                         (tauri-plugin-autostart), and a single-instance guard.
 //! ────────────────────────────────────────────────────────────────────────────
 
 mod commands;
@@ -37,7 +40,12 @@ mod state;
 
 use open_assistant::core::agent::Agent;
 use state::AppCore;
-use tauri::Manager;
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, WindowEvent,
+};
+use tauri_plugin_autostart::ManagerExt;
 
 /// Build the managed core: load config, construct the agent pointed at the
 /// configured data dir, honoring the persisted tool-execution posture.
@@ -56,12 +64,36 @@ fn build_core() -> AppCore {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Plugins registered before .setup(): logging, then dialog (folder
-        // picker) and opener (external provider-docs links).
+        // single-instance MUST be first: a 2nd launch focuses the running window
+        // instead of spawning a duplicate process (which would fight over the
+        // gateway port). The callback runs in the ALREADY-running instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
+        // Folder picker (onboarding) + scoped external-link opening (provider docs).
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // In-app auto-update: one-click, signature-verified, no installer prompt.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Launch openAssistant at system startup (always-on). Toggleable in Settings.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostarted"]),
+        ))
+        // Close-to-tray: the window "X" hides it (the app + gateway keep running in
+        // the tray). Only a tray "Quit" (app.exit) truly exits. Scoped to "main".
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -71,6 +103,114 @@ pub fn run() {
                 )?;
             }
             app.manage(build_core());
+
+            // ── System tray (run-in-background control) ──────────────────────
+            let show_i = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
+            let hide_i = MenuItem::with_id(app, "hide", "Hide Window", true, None::<&str>)?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let start_i = MenuItem::with_id(app, "gateway_start", "Start Gateway", true, None::<&str>)?;
+            let stop_i = MenuItem::with_id(app, "gateway_stop", "Stop Gateway", true, None::<&str>)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit openAssistant", true, None::<&str>)?;
+            let menu = Menu::with_items(
+                app,
+                &[&show_i, &hide_i, &sep1, &start_i, &stop_i, &sep2, &quit_i],
+            )?;
+
+            let mut tray = TrayIconBuilder::with_id("main-tray")
+                .tooltip("openAssistant")
+                .menu(&menu)
+                // Left-click shows the window (menu opens on right-click).
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.unminimize();
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "hide" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                    // Gateway start is async + behind a tokio Mutex in AppCore.
+                    "gateway_start" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppCore>();
+                            let mut g = state.gateway.lock().await;
+                            if g.as_ref().map_or(false, |h| h.is_running()) {
+                                return;
+                            }
+                            match open_assistant::config::load().await {
+                                Ok(cfg) => match open_assistant::gateway::start_gateway_handle(cfg).await {
+                                    Ok(h) => {
+                                        log::info!("tray: gateway started on {}", h.addr);
+                                        *g = Some(h);
+                                    }
+                                    Err(e) => log::error!("tray: gateway start failed: {e}"),
+                                },
+                                Err(e) => log::error!("tray: config load failed: {e}"),
+                            }
+                        });
+                    }
+                    "gateway_stop" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(h) = app.state::<AppCore>().gateway.lock().await.take() {
+                                h.stop();
+                            }
+                        });
+                    }
+                    // Quit REALLY exits: abort the gateway task, then exit the loop.
+                    "quit" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(h) = app.state::<AppCore>().gateway.lock().await.take() {
+                                h.stop();
+                            }
+                            app.exit(0);
+                        });
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.unminimize();
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                });
+            // The bundle icon (now the owl) — set only if present so we never panic.
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            let _tray = tray.build(app)?;
+
+            // ── Always-on bring-up (off-thread; never fatal) ─────────────────
+            // First-run autostart registration + auto-start the gateway when
+            // onboarded. Errors are logged, never propagated (no panic on a busy
+            // port or a restricted environment).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = sync_autostart_first_run(&handle).await {
+                    log::warn!("autostart first-run sync skipped: {e}");
+                }
+                if let Err(e) = autostart_gateway(&handle).await {
+                    log::info!("gateway autostart skipped: {e}");
+                }
+            });
+
             Ok(())
         })
         // SINGLE invoke_handler — Tauri keeps only the LAST registration.
@@ -132,7 +272,80 @@ pub fn run() {
             // in-app auto-update (one-click, signature-verified, no installer prompt)
             commands::updater::check_for_update,
             commands::updater::install_update,
+            // launch-at-startup (always-on)
+            commands::autostart::autostart_is_enabled,
+            commands::autostart::set_launch_at_startup,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On a real Quit, abort the in-process gateway task so it isn't leaked
+            // (the window-hide path keeps it running on purpose).
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppCore>() {
+                    // try_lock: at exit nothing should contend (the tray "Quit"
+                    // path releases the lock before exit). If it's briefly held,
+                    // skip — the process is terminating and the OS reaps the tasks.
+                    if let Ok(mut g) = state.gateway.try_lock() {
+                        if let Some(h) = g.take() {
+                            h.stop();
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// First-run only: push `config.desktop.launch_at_startup` into the OS autostart
+/// registration, then latch `autostart_initialized` so the user owns the state
+/// afterward. Best-effort. Debug builds skip registration so `cargo tauri dev`
+/// never registers a throwaway debug binary at login.
+async fn sync_autostart_first_run(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let mut cfg = open_assistant::config::load().await?;
+    if cfg.desktop.autostart_initialized {
+        return Ok(());
+    }
+    if !cfg!(debug_assertions) {
+        let mgr = app.autolaunch();
+        let currently = mgr.is_enabled().unwrap_or(false);
+        if cfg.desktop.launch_at_startup && !currently {
+            if let Err(e) = mgr.enable() {
+                log::warn!("autostart enable failed (continuing): {e}");
+            }
+        } else if !cfg.desktop.launch_at_startup && currently {
+            let _ = mgr.disable();
+        }
+    }
+    cfg.desktop.autostart_initialized = true;
+    open_assistant::config::save(&cfg).await?;
+    Ok(())
+}
+
+/// Start the in-process gateway on launch when configured AND onboarded; store the
+/// handle in `AppCore` so a later Quit can `.stop()` it. Never panics: a busy port
+/// or any error is logged and bring-up is abandoned.
+async fn autostart_gateway(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let cfg = open_assistant::config::load().await?;
+    if !cfg.desktop.gateway_autostart {
+        anyhow::bail!("desktop.gateway_autostart is false");
+    }
+    // Onboarding gate: no API key ⇒ the app is on the wizard, not chat.
+    if cfg.model.api_key.trim().is_empty() {
+        anyhow::bail!("onboarding incomplete (no api key)");
+    }
+    let state = app.state::<AppCore>();
+    let mut g = state.gateway.lock().await;
+    if g.as_ref().map_or(false, |h| h.is_running()) {
+        return Ok(());
+    }
+    match open_assistant::gateway::start_gateway_handle(cfg).await {
+        Ok(h) => {
+            log::info!("gateway auto-started on http://{}", h.addr);
+            *g = Some(h);
+        }
+        // Port busy (e.g. a 2nd instance / CLI gateway) — log + continue. The
+        // up-front bind in start_gateway_handle prevents any double-bind.
+        Err(e) => log::warn!("gateway auto-start failed (port busy?): {e}"),
+    }
+    Ok(())
 }

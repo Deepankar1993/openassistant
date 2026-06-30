@@ -40,6 +40,36 @@ pub struct Config {
     /// stays on free DuckDuckGo; setting a provider key engages that real engine.
     #[serde(default)]
     pub search: WebSearchConfig,
+    /// Desktop-app-only "always-on" posture (gateway autostart + launch-at-login).
+    /// The CLI never reads it; absent from CLI configs ⇒ serde default.
+    #[serde(default)]
+    pub desktop: DesktopConfig,
+}
+
+/// Desktop "always-on" settings. All desktop-only; `#[serde(default)]` keeps
+/// configs written before this section existed loadable (BriefConfig pattern).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopConfig {
+    /// Auto-start the in-process messaging gateway when the desktop app opens
+    /// (and onboarding is complete). Default true = "always-on".
+    pub gateway_autostart: bool,
+    /// Desired "launch openAssistant at system startup" state. Mirrors the OS
+    /// autostart registration so the Settings toggle renders without an async probe.
+    pub launch_at_startup: bool,
+    /// Whether the first-run sync of `launch_at_startup` → OS registration has run.
+    /// Prevents the default-on first-run enable from re-enabling after a user opt-out.
+    pub autostart_initialized: bool,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            gateway_autostart: true,
+            launch_at_startup: true,
+            autostart_initialized: false,
+        }
+    }
 }
 
 /// Multi-source web-search provider keys + preferred engine. Mirrors the keys
@@ -529,6 +559,12 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         "search.max_results" => {
             config.search.max_results = value.parse().unwrap_or(10)
         }
+        "desktop.gateway_autostart" => {
+            config.desktop.gateway_autostart = value.parse().unwrap_or(true)
+        }
+        "desktop.launch_at_startup" => {
+            config.desktop.launch_at_startup = value.parse().unwrap_or(true)
+        }
         _ => tracing::warn!("Unknown config key: {}", key),
     }
     save(&config).await?;
@@ -791,5 +827,29 @@ vision:
         // An unconfigured modality still falls through to the legacy block.
         let (_, _, vmodel) = resolve_provider(&cfg, "vision");
         assert_eq!(vmodel, cfg.model.model);
+    }
+
+    #[test]
+    fn desktop_config_defaults_and_round_trip() {
+        // Always-on defaults: gateway autostart + launch-at-login ON, not yet synced.
+        let cfg = Config::default();
+        assert!(cfg.desktop.gateway_autostart);
+        assert!(cfg.desktop.launch_at_startup);
+        assert!(!cfg.desktop.autostart_initialized);
+
+        let mut c2 = Config::default();
+        c2.desktop.launch_at_startup = false;
+        c2.desktop.autostart_initialized = true;
+        let yaml = serde_yaml::to_string(&c2).unwrap();
+        let back: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!back.desktop.launch_at_startup);
+        assert!(back.desktop.autostart_initialized);
+        assert!(back.desktop.gateway_autostart, "untouched field keeps its default");
+
+        // Legacy YAML without a `desktop:` key still loads (serde default).
+        let legacy = "general:\n  data_dir: /tmp/oa\nmodel:\n  provider: openrouter\n  model: m\n  api_key: ''\n  api_base: https://x\ngateway:\n  discord_token: ''\n  discord_allowed_users: []\n  telegram_token: ''\n  slack_token: ''\n  slack_signing_secret: ''\n  webhook_port: 0\n  dm_policy: open\nmemory:\n  db_path: /tmp/oa/m.db\n  max_entries: 1\n  fts_enabled: false\nskills:\n  dirs: []\n  auto_create: false\nsecurity:\n  dm_pairing: false\n  allow_from: []\nvision:\n  provider: g\n  gemini_path: g\n";
+        let cfg3: Config = serde_yaml::from_str(legacy).expect("legacy loads");
+        assert!(cfg3.desktop.gateway_autostart);
+        assert!(cfg3.desktop.launch_at_startup);
     }
 }

@@ -58,6 +58,7 @@
     convSeq: 0,
     activeConvId: null,
     gatewayRunning: false,
+    launchAtStartup: false,
     memoryMd: "# Long-term Memory\n\nNothing yet. Chat with your assistant to build up memory.",
     todayNote: "# Today\n\n*(no notes yet)*",
     memoryFiles: [
@@ -347,6 +348,11 @@
       case "gateway_stop":
         mockState.gatewayRunning = false;
         return null;
+      case "autostart_is_enabled":
+        return !!mockState.launchAtStartup;
+      case "set_launch_at_startup":
+        mockState.launchAtStartup = !!args.enabled;
+        return mockState.launchAtStartup;
       case "list_agents":
         return mockState.agents.slice();
       case "get_persona":
@@ -1028,6 +1034,37 @@
     }
   }
 
+  // Manual "Check for updates" (Status view) — complements the startup banner.
+  (function wireUpdateCheck() {
+    const btn = document.getElementById("check-update-btn");
+    if (!btn) return;
+    const txt = document.getElementById("update-status-text");
+    btn.addEventListener("click", async () => {
+      const prev = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      if (txt) txt.textContent = "Checking GitHub for a newer version…";
+      try {
+        const u = await backend("check_for_update", {});
+        if (u && u.available && u.version) {
+          if (txt) txt.textContent = "Update available: " + u.version + " (you have " + (u.current_version || "?") + "). Use the banner above to install.";
+          showUpdateBanner(u.version);
+          showToast("Update " + u.version + " available");
+        } else {
+          const cur = (u && u.current_version) ? " (" + u.current_version + ")" : "";
+          if (txt) txt.textContent = "You're on the latest version" + cur + ".";
+          showToast("You're up to date");
+        }
+      } catch (err) {
+        if (txt) txt.textContent = "Update check unavailable here (only works in the installed desktop app).";
+        showToast(typeof err === "string" ? err : "Update check failed", true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
+    });
+  })();
+
   // ── Settings ──────────────────────────────────────
 
   // Category navigation
@@ -1497,6 +1534,26 @@
     catch (_) { showToast("Failed to stop gateway", true); }
     refreshGatewayRunStatus();
   });
+
+  // Launch-at-startup toggle (OS autostart registration via tauri-plugin-autostart).
+  async function refreshLaunchAtStartup() {
+    const cb = $("#cfg-launch-startup");
+    if (!cb) return;
+    try { cb.checked = !!(await backend("autostart_is_enabled", {})); }
+    catch (_) { cb.checked = false; } // restricted env / browser mock
+  }
+  const launchCb = $("#cfg-launch-startup");
+  if (launchCb) launchCb.addEventListener("change", async () => {
+    try {
+      const now = await backend("set_launch_at_startup", { enabled: launchCb.checked });
+      launchCb.checked = !!now; // reflect authoritative OS state
+      showToast(now ? "Will launch at startup" : "Won't launch at startup");
+    } catch (err) {
+      launchCb.checked = !launchCb.checked; // revert the optimistic flip
+      showToast(typeof err === "string" ? err : "Couldn't change startup setting", true);
+    }
+  });
+  refreshLaunchAtStartup();
 
   // Advanced section form
   $("#settings-advanced-form").addEventListener("submit", async (e) => {

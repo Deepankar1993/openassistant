@@ -107,6 +107,7 @@ pub async fn run_wizard() -> Result<()> {
             ..Default::default()
         },
         search: crate::config::WebSearchConfig::default(),
+        desktop: crate::config::DesktopConfig::default(),
         skills: crate::config::SkillsConfig {
             dirs: if skill_dirs.is_empty() {
                 vec![format!("{}/skills", data_dir)]
