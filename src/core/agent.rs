@@ -1078,8 +1078,10 @@ impl Agent {
                 }
                 let (shell, flag) = super::hooks::hook_shell();
                 // Bounded like hooks: a hung command must not freeze the turn.
-                let run = tokio::process::Command::new(shell).arg(flag).arg(command).output();
-                match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+                let mut cmd = tokio::process::Command::new(shell);
+                cmd.arg(flag).arg(command).kill_on_drop(true);
+                crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
+                match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await {
                     Ok(Ok(o)) => info!("standing order '{}' ran (exit {:?})", order.name, o.status.code()),
                     Ok(Err(e)) => tracing::warn!("standing order '{}' command failed: {}", order.name, e),
                     Err(_) => tracing::warn!("standing order '{}' RunCommand timed out (30s)", order.name),

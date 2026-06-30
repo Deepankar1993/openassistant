@@ -165,12 +165,14 @@ pub async fn stream_bash_output(
 ) -> Result<Vec<String>> {
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let output = tokio::time::timeout(timeout, async {
-        let child = tokio::process::Command::new("bash")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
             .arg(command)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .kill_on_drop(true); // don't orphan the child if the timeout fires
+        crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
+        let child = cmd.spawn()?;
         child.wait_with_output().await
     }).await??;
 

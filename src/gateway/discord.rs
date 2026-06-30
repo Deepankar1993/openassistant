@@ -626,12 +626,23 @@ fn build_human_prompt(persona: &Persona, extra: &str) -> String {
 }
 
 fn thread_title(content: &str) -> String {
-    let first = content.lines().next().unwrap_or(content).trim();
+    // Strip Discord mention markup first — thread names don't resolve mentions,
+    // so a raw "<@&1234…> hi" would show literally in the title.
+    let cleaned = strip_mentions(content);
+    let first = cleaned.lines().next().unwrap_or(&cleaned).trim();
     let mut t: String = first.chars().take(THREAD_NAME_MAX).collect();
     if t.trim().is_empty() {
         t = "conversation".to_string();
     }
     t
+}
+
+/// Remove Discord mention markup — user `<@id>` / `<@!id>`, role `<@&id>`, and
+/// channel `<#id>` — so titles and logs read cleanly. Pure, unit-testable.
+fn strip_mentions(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"<@[!&]?\d+>|<#\d+>").unwrap());
+    RE.replace_all(s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn gate(user_id: &str, allowed: &[String], dm_policy: &str) -> bool {
@@ -764,6 +775,18 @@ mod tests {
         assert_eq!(thread_title("hello world"), "hello world");
         assert!(thread_title(&"x".repeat(200)).chars().count() <= THREAD_NAME_MAX);
         assert_eq!(thread_title("   "), "conversation");
+    }
+
+    #[test]
+    fn thread_title_strips_mention_markup() {
+        // The exact shape from the bug report: a role mention + text.
+        assert_eq!(thread_title("<@&1511641553133637694> hi"), "hi");
+        // User + channel mentions are stripped; collapse leftover whitespace.
+        assert_eq!(thread_title("<@123> <#456> hello there"), "hello there");
+        assert_eq!(thread_title("<@!999> ping"), "ping");
+        // A message that is ONLY a mention falls back to the default name.
+        assert_eq!(thread_title("<@!999>"), "conversation");
+        assert_eq!(strip_mentions("a <@1> b"), "a b");
     }
 
     #[test]

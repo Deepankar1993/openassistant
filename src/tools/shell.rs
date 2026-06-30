@@ -19,10 +19,10 @@ pub async fn execute(args: &serde_json::Value) -> Result<ToolResult> {
     debug!("Executing shell command: {}", command);
 
     let result = tokio::task::spawn_blocking(move || {
-        Command::new("bash")
-            .arg("-c")
-            .arg(&command)
-            .output()
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(&command);
+        crate::core::proc::no_window_std(&mut cmd); // no console window flash on Windows
+        cmd.output()
     }).await;
 
     let output = match result {

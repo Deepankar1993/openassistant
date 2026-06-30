@@ -137,6 +137,8 @@ impl McpClient {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true); // tie the MCP server's lifetime to the registry (no orphans)
+        crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
 
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?;

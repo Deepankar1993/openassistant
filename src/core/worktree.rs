@@ -39,26 +39,30 @@ impl WorktreeManager {
         tokio::fs::create_dir_all(&self.worktrees_dir).await?;
 
         // Create the worktree
-        let output = tokio::process::Command::new("git")
-            .args(&["worktree", "add"])
-            .arg(worktree_path.to_str().unwrap())
-            .arg("-b")
-            .arg(&branch_name)
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
+        let output = crate::core::proc::no_window(
+            tokio::process::Command::new("git")
+                .args(&["worktree", "add"])
+                .arg(worktree_path.to_str().unwrap())
+                .arg("-b")
+                .arg(&branch_name)
+                .current_dir(&self.base_dir),
+        )
+        .output()
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // If branch already exists, try without -b
             if stderr.contains("already exists") {
-                let output2 = tokio::process::Command::new("git")
-                    .args(&["worktree", "add"])
-                    .arg(worktree_path.to_str().unwrap())
-                    .arg(&branch_name)
-                    .current_dir(&self.base_dir)
-                    .output()
-                    .await?;
+                let output2 = crate::core::proc::no_window(
+                    tokio::process::Command::new("git")
+                        .args(&["worktree", "add"])
+                        .arg(worktree_path.to_str().unwrap())
+                        .arg(&branch_name)
+                        .current_dir(&self.base_dir),
+                )
+                .output()
+                .await?;
 
                 if !output2.status.success() {
                     return Err(anyhow::anyhow!(
@@ -72,11 +76,13 @@ impl WorktreeManager {
         }
 
         // Get the commit hash
-        let commit_output = tokio::process::Command::new("git")
-            .args(&["rev-parse", "HEAD"])
-            .current_dir(&worktree_path)
-            .output()
-            .await?;
+        let commit_output = crate::core::proc::no_window(
+            tokio::process::Command::new("git")
+                .args(&["rev-parse", "HEAD"])
+                .current_dir(&worktree_path),
+        )
+        .output()
+        .await?;
 
         let commit = String::from_utf8_lossy(&commit_output.stdout).trim().to_string();
 
@@ -92,11 +98,13 @@ impl WorktreeManager {
 
     /// List all worktrees
     pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = tokio::process::Command::new("git")
-            .args(&["worktree", "list", "--porcelain"])
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
+        let output = crate::core::proc::no_window(
+            tokio::process::Command::new("git")
+                .args(&["worktree", "list", "--porcelain"])
+                .current_dir(&self.base_dir),
+        )
+        .output()
+        .await?;
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
@@ -156,12 +164,14 @@ impl WorktreeManager {
 
         info!("Removing worktree: {}", name);
 
-        let output = tokio::process::Command::new("git")
-            .args(&["worktree", "remove"])
-            .arg(worktree_path.to_str().unwrap())
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
+        let output = crate::core::proc::no_window(
+            tokio::process::Command::new("git")
+                .args(&["worktree", "remove"])
+                .arg(worktree_path.to_str().unwrap())
+                .current_dir(&self.base_dir),
+        )
+        .output()
+        .await?;
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
@@ -176,11 +186,13 @@ impl WorktreeManager {
 
     /// Prune stale worktrees
     pub async fn prune_worktrees(&self) -> Result<Vec<String>> {
-        let output = tokio::process::Command::new("git")
-            .args(&["worktree", "prune"])
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
+        let output = crate::core::proc::no_window(
+            tokio::process::Command::new("git")
+                .args(&["worktree", "prune"])
+                .current_dir(&self.base_dir),
+        )
+        .output()
+        .await?;
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
