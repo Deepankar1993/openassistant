@@ -91,14 +91,10 @@ impl ClaudeBridge {
 
     /// Check that the binary responds to `--version`.
     pub async fn available(&self) -> bool {
-        Command::new(&self.bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
+        crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
+        cmd.status().await.map(|s| s.success()).unwrap_or(false)
     }
 
     fn build_args(&self, resume: Option<&str>) -> Vec<String> {
@@ -144,12 +140,17 @@ impl ClaudeBridge {
         let args = self.build_args(resume);
         debug!("claude bridge: {} {:?} (cwd={})", self.bin, args, self.workspace);
 
-        let mut child = Command::new(&self.bin)
-            .args(&args)
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(&args)
             .current_dir(&self.workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // If the timeout below fires we drop the child — kill it instead of
+            // orphaning a still-running `claude` process (resource leak).
+            .kill_on_drop(true);
+        crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
+        let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed to launch '{}': {} (is Claude Code installed / on PATH?)", self.bin, e))?;
 

@@ -184,10 +184,10 @@ async fn run_cmd(cmd: &str, args: &[&str], cwd: &str) -> Result<Output> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let cmd = cmd.to_string();
         move || {
-            std::process::Command::new(&cmd)
-                .args(&args)
-                .current_dir(&cwd)
-                .output()
+            let mut command = std::process::Command::new(&cmd);
+            command.args(&args).current_dir(&cwd);
+            crate::core::proc::no_window_std(&mut command); // no console window flash on Windows
+            command.output()
         }
     })
     .await

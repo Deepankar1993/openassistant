@@ -267,13 +267,13 @@ impl PluginMarketplace {
             }
             PluginSource::Git { url, branch } => {
                 info!("Installing plugin from git: {} (branch: {:?})", url, branch);
-                let output = tokio::process::Command::new("git")
-                    .args(&["clone"])
+                let mut cmd = tokio::process::Command::new("git");
+                cmd.args(&["clone"])
                     .args(branch.as_ref().map(|b| vec!["-b", b]).unwrap_or_default())
                     .arg(url)
-                    .arg(PathBuf::from(&self.install_dir).join("temp"))
-                    .output()
-                    .await?;
+                    .arg(PathBuf::from(&self.install_dir).join("temp"));
+                crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
+                let output = cmd.output().await?;
 
                 if !output.status.success() {
                     return Err(anyhow::anyhow!(

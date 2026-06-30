@@ -61,6 +61,8 @@ pub async fn execute(args: &serde_json::Value) -> Result<BashResult> {
     
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true); // don't orphan the child if the timeout below fires
+    crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
 
     // Execute with timeout
     let output = match tokio::time::timeout(timeout, async {

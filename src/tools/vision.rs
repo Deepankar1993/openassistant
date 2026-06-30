@@ -22,12 +22,10 @@ pub async fn execute(args: &serde_json::Value) -> Result<ToolResult> {
 
     let prompt = format!("[image: {}] {}", image_path, question);
     let result = tokio::task::spawn_blocking(move || {
-        Command::new("gemini")
-            .arg("--skip-trust")
-            .arg("image")
-            .arg("analyze")
-            .arg(&prompt)
-            .output()
+        let mut cmd = Command::new("gemini");
+        cmd.arg("--skip-trust").arg("image").arg("analyze").arg(&prompt);
+        crate::core::proc::no_window_std(&mut cmd); // no console window flash on Windows
+        cmd.output()
     }).await;
 
     let output = match result {
@@ -76,11 +74,10 @@ pub async fn execute(args: &serde_json::Value) -> Result<ToolResult> {
 pub async fn check() -> Result<()> {
     debug!("Checking Gemini CLI availability");
     let result = tokio::task::spawn_blocking(|| {
-        Command::new("gemini")
-            .arg("--skip-trust")
-            .arg("whoami")
-            .env("GEMINI_CLI_TRUST_WORKSPACE", "true")
-            .output()
+        let mut cmd = Command::new("gemini");
+        cmd.arg("--skip-trust").arg("whoami").env("GEMINI_CLI_TRUST_WORKSPACE", "true");
+        crate::core::proc::no_window_std(&mut cmd); // no console window flash on Windows
+        cmd.output()
     }).await;
 
     let output = match result {

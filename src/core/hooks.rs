@@ -195,6 +195,8 @@ impl HookEngine {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true); // don't orphan a hung hook if the timeout fires
+        crate::core::proc::no_window(&mut cmd); // no console window flash on Windows
 
         debug!("Executing hook: {} (event: {:?})", hook.description, hook.event);
 
