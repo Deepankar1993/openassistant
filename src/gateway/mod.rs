@@ -140,10 +140,18 @@ pub fn format_readiness(reqs: &[GatewayRequirement]) -> String {
     s
 }
 
+/// Abort handles for the detached channel/proactive sub-tasks spawned inside
+/// `run_all`. Aborting only the outer run_all task would orphan these (the
+/// Discord serenity loop, Telegram long-poll, and proactive tick keep running),
+/// which on a stop→start cycle would duplicate connections and deliveries — a
+/// real task/resource leak. `GatewayRunHandle::stop()` aborts every entry.
+type SubTasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>;
+
 /// Spawn the optional channels (Discord/Telegram) and run the WebChat server in
 /// the foreground (blocks until it stops). Shared by the CLI (`start_gateway`)
-/// and the desktop (`start_gateway_handle`).
-async fn run_all(config: Config) -> Result<()> {
+/// and the desktop (`start_gateway_handle`). Each detached sub-task's
+/// `AbortHandle` is recorded in `subtasks` so the caller can cancel them on stop.
+async fn run_all(config: Config, subtasks: SubTasks) -> Result<()> {
     // One MCP registry (owns the server subprocesses) shared across channels.
     let mcp = build_mcp(&config).await;
 
@@ -152,21 +160,23 @@ async fn run_all(config: Config) -> Result<()> {
         info!("Discord token configured, starting Discord handler...");
         let cfg = config.clone();
         let mcp = mcp.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             if let Err(e) = discord::start(cfg, mcp).await {
                 tracing::error!("Discord gateway error: {}", e);
             }
         });
+        if let Ok(mut v) = subtasks.lock() { v.push(h.abort_handle()); }
     }
     if !config.gateway.telegram_token.is_empty() {
         info!("Telegram token configured, starting Telegram handler...");
         let cfg = config.clone();
         let mcp = mcp.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             if let Err(e) = telegram::start(cfg, mcp).await {
                 tracing::error!("Telegram gateway error: {}", e);
             }
         });
+        if let Ok(mut v) = subtasks.lock() { v.push(h.abort_handle()); }
     }
     if !config.gateway.slack_token.is_empty() || !config.gateway.slack_signing_secret.is_empty() {
         info!("Slack configured — Events endpoint will be served at POST /slack/events (requires a public URL).");
@@ -176,7 +186,8 @@ async fn run_all(config: Config) -> Result<()> {
     // config, so brief.enabled / watcher edits apply without a restart.
     {
         let cfg = config.clone();
-        tokio::spawn(proactive::proactive_loop(cfg));
+        let h = tokio::spawn(proactive::proactive_loop(cfg));
+        if let Ok(mut v) = subtasks.lock() { v.push(h.abort_handle()); }
     }
 
     info!("Starting WebChat messaging server (real agent loop)...");
@@ -206,7 +217,10 @@ async fn build_mcp(config: &Config) -> Option<std::sync::Arc<crate::core::mcp::M
 pub async fn start_gateway() -> Result<()> {
     info!("Starting openAssistant gateway...");
     let config = crate::config::load().await?;
-    run_all(config).await
+    // CLI foreground: runs until the process is killed, so the recorded sub-task
+    // handles are never used — but run_all needs the collector.
+    let subtasks: SubTasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    run_all(config, subtasks).await
 }
 
 /// A running gateway that can be polled or stopped — used by the desktop app to
@@ -215,11 +229,19 @@ pub struct GatewayRunHandle {
     /// The resolved bind address (host:port).
     pub addr: String,
     task: tokio::task::JoinHandle<()>,
+    /// Abort handles for the detached channel/proactive sub-tasks (see `SubTasks`).
+    subtasks: SubTasks,
 }
 
 impl GatewayRunHandle {
-    /// Abort the gateway task (stops the WebChat server + spawned channels).
+    /// Abort the gateway task AND its detached channel/proactive sub-tasks, so a
+    /// stop→start cycle doesn't leak a second Discord/Telegram/proactive loop.
     pub fn stop(&self) {
+        if let Ok(v) = self.subtasks.lock() {
+            for h in v.iter() {
+                h.abort();
+            }
+        }
         self.task.abort();
     }
 
@@ -252,13 +274,15 @@ pub async fn start_gateway_handle(config: Config) -> Result<GatewayRunHandle> {
             .map_err(|e| anyhow::anyhow!("cannot bind {addr}: {e}"))?;
     }
 
+    let subtasks: SubTasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subtasks_run = subtasks.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = run_all(config).await {
+        if let Err(e) = run_all(config, subtasks_run).await {
             tracing::error!("Gateway stopped: {}", e);
         }
     });
 
-    Ok(GatewayRunHandle { addr, task })
+    Ok(GatewayRunHandle { addr, task, subtasks })
 }
 
 pub async fn check() -> Result<()> {
