@@ -1,6 +1,6 @@
 [package]
 name = "openassistant-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "openAssistant desktop application (Tauri 2.x shell over the open_assistant core)"
 authors = ["openAssistant"]
 license = "MIT"
@@ -29,6 +29,9 @@ tauri-plugin-log = "2"
 # Native folder picker (onboarding) and safe external-link opening (provider docs).
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# In-app auto-update (one-click, no installer/uninstall prompt). Driven from
+# Rust via UpdaterExt; checks GitHub releases for a signed newer version.
+tauri-plugin-updater = "2"
 # Direct dependency: probe_connection calls the LLM endpoint from Rust, NOT the
 # webview, so it does not go through tauri-plugin-http's frontend gate.
 reqwest = { version = "0.12", features = ["json"] }

@@ -14,6 +14,7 @@ pub mod schedules;
 pub mod settings;
 pub mod skills;
 pub mod system;
+pub mod updater;
 
 /// Mask a secret (API key / channel token): keep only the last 4 characters.
 /// Shared by the Settings and onboarding DTOs so nothing is ever sent in clear.

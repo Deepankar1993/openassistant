@@ -23,8 +23,10 @@
 //! the desktop this cycle; a later desktop change can add UI against them:
 //!   Workflow execution  — real LLM steps + persistence (core/workflows.rs).
 //!   Checkpoint restore  — persistent SQLite + SHA-256-guarded restore (core/checkpoint.rs).
-//!   Self-update         — real git source update via `openassistant update`
-//!                         (a desktop button still needs tauri-plugin-updater + an endpoint).
+//!   Self-update         — real git source update via `openassistant update`; the
+//!                         DESKTOP now ships tauri-plugin-updater (commands::updater::
+//!                         {check_for_update,install_update}) against the GitHub-releases
+//!                         latest.json — one-click, signature-verified, no installer prompt.
 //!   Gateway channels    — WebChat/Discord/Telegram/Slack all run the real
 //!                         Agent::process loop (gateway/); Slack needs a public URL.
 //!   goal_deliberate     — real per-role LLM deliberation + persisted goals/subgoals.
@@ -58,6 +60,8 @@ pub fn run() {
         // picker) and opener (external provider-docs links).
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // In-app auto-update: one-click, signature-verified, no installer prompt.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -125,6 +129,9 @@ pub fn run() {
             commands::schedules::list_watchers,
             commands::schedules::get_brief_settings,
             commands::schedules::get_schedules_overview,
+            // in-app auto-update (one-click, signature-verified, no installer prompt)
+            commands::updater::check_for_update,
+            commands::updater::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2989,6 +2989,57 @@
       .replace(/"/g, "&quot;");
   }
 
+  // ── Auto-update (desktop only) ────────────────────
+  // Best-effort: ask the Rust updater command whether a newer signed release is
+  // on GitHub. Any failure (browser mock, offline, no endpoint) is ignored.
+  async function checkForUpdate() {
+    try {
+      const u = await backend("check_for_update", {});
+      if (u && u.available && u.version) showUpdateBanner(u.version);
+    } catch (_) { /* not running in the desktop app, or offline — ignore */ }
+  }
+
+  function showUpdateBanner(version) {
+    let bar = document.getElementById("update-banner");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "update-banner";
+      bar.style.cssText =
+        "position:fixed;top:0;left:0;right:0;z-index:9999;display:flex;align-items:center;" +
+        "gap:12px;justify-content:center;padding:8px 16px;background:#2563eb;color:#fff;" +
+        "font-size:13px;box-shadow:0 1px 6px rgba(0,0,0,.2)";
+      document.body.appendChild(bar);
+    }
+    bar.style.display = "flex";
+    bar.replaceChildren();
+    const msg = document.createElement("span");
+    msg.textContent = "openAssistant " + version + " is available.";
+    const btn = document.createElement("button");
+    btn.textContent = "Install & Restart";
+    btn.style.cssText =
+      "background:#fff;color:#1d4ed8;border:0;border-radius:6px;padding:4px 12px;font-weight:600;cursor:pointer";
+    btn.addEventListener("click", () => installUpdate(btn));
+    const later = document.createElement("button");
+    later.textContent = "Later";
+    later.style.cssText =
+      "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:6px;padding:4px 10px;cursor:pointer";
+    later.addEventListener("click", () => { bar.style.display = "none"; });
+    bar.append(msg, btn, later);
+  }
+
+  async function installUpdate(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Downloading…"; }
+    showToast("Downloading update…");
+    try {
+      // On success the Rust side installs in place and relaunches the app, so
+      // this call typically does not return.
+      await backend("install_update", {});
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.textContent = "Install & Restart"; }
+      showToast(typeof err === "string" ? err : "Update failed", true);
+    }
+  }
+
   // ── Boot ──────────────────────────────────────────
   async function boot() {
     messageList.appendChild(emptyState());
@@ -3028,6 +3079,9 @@
         else await refreshStatus();
       } catch (_) {}
     }
+
+    // Background app-update check (desktop only; no-op in the browser mock).
+    checkForUpdate();
   }
   boot();
 })();
