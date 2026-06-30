@@ -319,6 +319,13 @@
                   <small class="hint">Starts the messaging server in-process. Equivalent to running <code>openassistant gateway</code> in a terminal.</small>
                 </div>
                 <div class="field" style="margin-top:12px;">
+                  <label style="display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;">
+                    <span>Launch openAssistant at system startup</span>
+                    <input type="checkbox" id="cfg-launch-startup" data-testid="settings-launch-startup" />
+                  </label>
+                  <small class="hint">Starts the app automatically when you log in; it lives in the system tray and auto-starts the gateway in-process, so it's always ready.</small>
+                </div>
+                <div class="field" style="margin-top:12px;">
                   <span>Or run from a terminal</span>
                   <div class="input-row">
                     <input type="text" id="gateway-run-cmd" data-testid="gateway-run-cmd" readonly value="openassistant gateway" />
@@ -492,6 +499,15 @@
                 Run Setup Wizard
               </button>
             </div>
+          </div>
+
+          <!-- Updates card -->
+          <div class="card" style="margin-top:0;" id="updates-card" data-testid="updates-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <h3>Updates</h3>
+              <button class="btn small primary" id="check-update-btn" data-testid="check-update">Check for updates</button>
+            </div>
+            <p class="hint" id="update-status-text">Checks GitHub for a newer signed version. Updates install in place — your API keys and memory are preserved.</p>
           </div>
 
           <!-- Doctor card -->

@@ -277,7 +277,8 @@ fn rebuild_agent_if_model_changed(turn: &mut crate::state::Turn, cfg: &config::C
         let ws = turn.agent.workspace_dir.clone();
         turn.agent = Agent::new(cfg.model.model.clone())
             .with_workspace(ws)
-            .with_tools_enabled(tools);
+            .with_tools_enabled(tools)
+            .operator(); // desktop is the trusted local operator (gates lifecycle hooks)
     }
 }
 
